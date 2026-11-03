@@ -1,0 +1,18 @@
+# User inputs and generated collections
+/origin/
+/work/
+/exports/
+/release/
+/handoff/
+/.topolog-workspace.json
+
+# Local hosting experiment; GitHub Pages uses docs/
+/demo-site/
+
+# Development caches
+node_modules/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
