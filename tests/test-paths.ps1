@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 $ErrorActionPreference='Stop'
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools\project-paths.ps1')
 $fixture=Join-Path ([IO.Path]::GetTempPath()) ('topolog-paths-'+[guid]::NewGuid().ToString('N'))

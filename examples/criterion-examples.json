@@ -1,0 +1,32 @@
+{
+  "ospf_neighbor": {
+    "kind": "ospf_neighbors",
+    "neighbors": ["192.0.2.2"]
+  },
+  "rip_route": {
+    "kind": "route",
+    "prefix": "198.51.100.0/24",
+    "protocol": "R",
+    "next_hop": "192.0.2.2"
+  },
+  "redistributed_ospf_route": {
+    "kind": "route",
+    "prefix": "198.51.100.0/24",
+    "protocol": "O E2"
+  },
+  "reachability": {
+    "kind": "ping",
+    "target": "198.51.100.1",
+    "min_percent": 100
+  },
+  "asa_policy": {
+    "kind": "asa_packet",
+    "interface": "inside",
+    "protocol": "tcp",
+    "source": "192.0.2.10",
+    "source_port": 12345,
+    "destination": "198.51.100.10",
+    "destination_port": 443,
+    "expected_action": "drop"
+  }
+}

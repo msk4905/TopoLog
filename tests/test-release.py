@@ -8,8 +8,9 @@ root = Path(sys.argv[1])
 forbidden = {"origin", "work", "exports", "demo-site", ".git", ".openai", "node_modules", "__pycache__", "handoff", ".topolog-workspace.json", "plan.md", "PUBLISHING.md", "UPLOAD_GUIDE.md"}
 for file in root.rglob("*"):
     assert not forbidden.intersection(file.relative_to(root).parts), file
-source = root / "TopoLog-v0.1.0-source.zip"
-demo = root / "TopoLog-v0.1.0-demo.zip"
+version = (root / "TopoLog" / "VERSION").read_text(encoding="utf-8-sig").strip()
+source = root / f"TopoLog-v{version}-source.zip"
+demo = root / f"TopoLog-v{version}-demo.zip"
 with zipfile.ZipFile(source) as archive:
     assert archive.testzip() is None
     names = archive.namelist()
@@ -21,7 +22,7 @@ with zipfile.ZipFile(source) as archive:
         assert not path.name.startswith(".env"), name
     for name in ["TopoLog/TopoLog.cmd", "TopoLog/RELEASE_NOTES.md", "TopoLog/VALIDATION.md", "TopoLog/docs/index.html", "TopoLog/docs/.nojekyll", "TopoLog/.gitignore", "TopoLog/tools/TopoLogWindowCapture.cs", "TopoLog/tools/collect-project.ps1", "TopoLog/tools/gns3-api.ps1", "TopoLog/tools/project-paths.ps1"]:
         assert name in names, name
-    assert archive.read("TopoLog/VERSION").decode().strip() == "0.1.0"
+    assert archive.read("TopoLog/VERSION").decode("utf-8-sig").strip() == version
     assert "PUBLISHING.md" not in archive.read("TopoLog/README.md").decode("utf-8-sig"), "README links to an internal document"
     for name in names:
         if name.endswith((".ps1", ".cs", ".cjs", ".html", ".md")):

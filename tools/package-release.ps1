@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 [CmdletBinding()]
 param(
     [ValidatePattern('^\d+\.\d+\.\d+([.-][A-Za-z0-9.-]+)?$')][string]$Version='',
@@ -19,10 +19,10 @@ if(Test-Path -LiteralPath $release){throw 'A release directory already exists. P
 $stage=Join-Path $release 'TopoLog'
 [IO.Directory]::CreateDirectory($stage)|Out-Null
 $files=@()
-foreach($name in @('README.md','VERSION','CHANGELOG.md','RELEASE_NOTES.md','VALIDATION.md','TopoLog.cmd','.gitignore')){
+foreach($name in @('README.md','VERSION','CHANGELOG.md','RELEASE_NOTES.md','VALIDATION.md','BATCH.md','TopoLog-Batch.cmd','TopoLog-Report.cmd','TopoLog.cmd','.gitignore')){
     $files+=Get-Item -LiteralPath (Join-Path $root $name)
 }
-foreach($folder in @('tools','tests','docs')){
+foreach($folder in @('tools','tests','docs','examples')){
     $files+=Get-ChildItem -LiteralPath (Join-Path $root $folder) -Recurse -Force -File | Where-Object {$_.FullName -notmatch '\\(__pycache__|node_modules)\\'}
 }
 foreach($file in $files){

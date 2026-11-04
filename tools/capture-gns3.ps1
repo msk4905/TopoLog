@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$ProjectName = '20260827-1',
+    [string]$ProjectFile = '',
     [ValidateSet('Native','PrintWindow','Screen')][string]$Method = 'Native',
     [string]$OutputDirectory = ''
 )
@@ -39,6 +40,23 @@ $metadata=[ordered]@{
 try {
     $windows=@([TopoLogWindowCapture]::List())
     $candidates=@($windows | Where-Object {[TopoLogWindowCapture]::TitleMatches($_.Title,$ProjectName)})
+    if($candidates.Count -eq 0 -and $ProjectFile) {
+        $idle=@($windows | Where-Object {$_.Title.Trim() -eq 'GNS3'})
+        if($idle.Count -ne 1) {throw 'Keep one idle GNS3 window open for batch screenshots. An unrelated open project will not be replaced.'}
+        # A freshly started GNS3 shows its modal startup chooser; cancel only that dialog.
+        $startup=@([TopoLogWindowCapture]::FindStartupProjectDialogs($idle[0].Handle,$idle[0].ProcessId))
+        if($startup.Count -eq 1) {
+            [TopoLogWindowCapture]::CloseWindow($startup[0].Handle)
+            $metadata['startup_dialog']='closed'
+            $clock=[Diagnostics.Stopwatch]::StartNew()
+            while($clock.Elapsed.TotalSeconds -lt 5 -and @([TopoLogWindowCapture]::FindStartupProjectDialogs($idle[0].Handle,$idle[0].ProcessId)).Count -gt 0){Start-Sleep -Milliseconds 150}
+            if(@([TopoLogWindowCapture]::FindStartupProjectDialogs($idle[0].Handle,$idle[0].ProcessId)).Count -gt 0){throw 'The GNS3 startup Project dialog did not close.'}
+        } elseif($startup.Count -gt 1) {throw 'More than one GNS3 Project dialog is open.'}
+        $metadata['open_project_record']='open-project.json'
+        & (Join-Path $PSScriptRoot 'open-gns3-project.ps1') -WindowHandle $idle[0].Handle -Gns3ProcessId $idle[0].ProcessId -ProjectFile $ProjectFile -ProjectName $ProjectName -RecordDirectory $OutputDirectory
+        $windows=@([TopoLogWindowCapture]::List())
+        $candidates=@($windows | Where-Object {[TopoLogWindowCapture]::TitleMatches($_.Title,$ProjectName)})
+    }
     if($candidates.Count -ne 1) {
         $windows | Select-Object Title,ProcessName,Minimized | Format-Table -AutoSize
         throw ('Expected exactly one GNS3 window for project '+$ProjectName+'; found '+$candidates.Count+'.')

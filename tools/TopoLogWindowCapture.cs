@@ -52,19 +52,33 @@ public static class TopoLogWindowCapture {
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
 
     public static bool TitleMatches(string title, string projectName) {
-        return title != null && title.IndexOf("GNS3", StringComparison.OrdinalIgnoreCase) >= 0 &&
-            Regex.IsMatch(title, @"(?<![A-Za-z0-9])" + Regex.Escape(projectName) + @"(?![A-Za-z0-9])", RegexOptions.IgnoreCase);
+        return title != null && String.Equals(title.Trim(), projectName + " - GNS3", StringComparison.OrdinalIgnoreCase);
     }
     public static bool IsScreenshotDialog(string title,int processId,long owner,long mainWindow,int gns3ProcessId) {
         return String.Equals(title,"Screenshot",StringComparison.OrdinalIgnoreCase) &&
             (processId==gns3ProcessId || owner==mainWindow);
     }
     public static TopoLogDialogInfo[] FindScreenshotDialogs(long mainWindow,int gns3ProcessId) {
+        return FindOwnedDialogs("Screenshot",mainWindow,gns3ProcessId);
+    }
+    public static TopoLogDialogInfo[] FindProjectOpenDialogs(long mainWindow,int gns3ProcessId) {
+        return FindOwnedDialogs("Open project",mainWindow,gns3ProcessId);
+    }
+    // GNS3's startup chooser (title "Project") is modal and blocks the Open project action.
+    public static TopoLogDialogInfo[] FindStartupProjectDialogs(long mainWindow,int gns3ProcessId) {
+        return FindOwnedDialogs("Project",mainWindow,gns3ProcessId);
+    }
+    // WM_CLOSE is the same as the dialog's window close button (Qt reject); nothing is saved.
+    public static void CloseWindow(long handle) {
+        if(!PostMessage(new IntPtr(handle),16,IntPtr.Zero,IntPtr.Zero))
+            throw new InvalidOperationException("Could not close the GNS3 startup dialog.");
+    }
+    private static TopoLogDialogInfo[] FindOwnedDialogs(string expectedTitle,long mainWindow,int gns3ProcessId) {
         var dialogs=new List<TopoLogDialogInfo>();
         EnumWindows(delegate(IntPtr hwnd,IntPtr unused) {
             if(hwnd.ToInt64()==mainWindow || !IsWindowVisible(hwnd)) return true;
             var text=new StringBuilder(2048);GetWindowText(hwnd,text,text.Capacity);
-            if(!String.Equals(text.ToString(),"Screenshot",StringComparison.OrdinalIgnoreCase)) return true;
+            if(!String.Equals(text.ToString(),expectedTitle,StringComparison.OrdinalIgnoreCase)) return true;
             uint pid;GetWindowThreadProcessId(hwnd,out pid);
             IntPtr owner=GetWindow(hwnd,4),ancestor=owner;
             bool owned=false;
@@ -72,7 +86,7 @@ public static class TopoLogWindowCapture {
                 if(ancestor.ToInt64()==mainWindow){owned=true;break;}
                 ancestor=GetWindow(ancestor,4);
             }
-            if(!IsScreenshotDialog(text.ToString(),(int)pid,owned ? mainWindow : owner.ToInt64(),mainWindow,gns3ProcessId)) return true;
+            if((int)pid!=gns3ProcessId && !owned) return true;
             var className=new StringBuilder(256);GetClassName(hwnd,className,className.Capacity);
             dialogs.Add(new TopoLogDialogInfo {Handle=hwnd.ToInt64(),Title=text.ToString(),ProcessId=(int)pid,OwnerHandle=owner.ToInt64(),ClassName=className.ToString()});
             return true;
@@ -89,6 +103,61 @@ public static class TopoLogWindowCapture {
         },IntPtr.Zero);
         if(matches.Count!=1) throw new InvalidOperationException("Could not uniquely locate dialog control "+id+" ("+expectedClass+").");
         return matches[0];
+    }
+    [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
+    public static long FindFilenameControl(long dialog) {
+        // Vista+ Open dialogs put the filename Edit under cmb13 (1148:
+        // ComboBoxEx32 > ComboBox > Edit), Save dialogs use 1001. Unrelated
+        // address/search fields have other IDs and are never selected.
+        var handles=new List<long>();var visible=new List<bool>();
+        EnumChildWindows(new IntPtr(dialog),delegate(IntPtr hwnd,IntPtr unused) {
+            var name=new StringBuilder(256);GetClassName(hwnd,name,name.Capacity);
+            if(!String.Equals(name.ToString(),"Edit",StringComparison.OrdinalIgnoreCase)) return true;
+            var ancestors=new List<int>();
+            IntPtr parent=GetParent(hwnd);
+            for(int i=0;i<4 && parent!=IntPtr.Zero && parent.ToInt64()!=dialog;i++) {
+                ancestors.Add(GetDlgCtrlID(parent));
+                parent=GetParent(parent);
+            }
+            if(IsFilenameEdit(GetDlgCtrlID(hwnd),ancestors.ToArray())) {
+                handles.Add(hwnd.ToInt64());visible.Add(IsWindowVisible(hwnd));
+            }
+            return true;
+        },IntPtr.Zero);
+        long chosen=ChooseFilenameCandidate(handles.ToArray(),visible.ToArray());
+        if(chosen==0) throw new InvalidOperationException("Could not uniquely identify the filename edit control (1001/1148); candidates="+handles.Count+".");
+        return chosen;
+    }
+    public static bool IsFilenameEdit(int id,int[] ancestorIds) {
+        if(id==1001 || id==1148) return true;
+        if(ancestorIds==null) return false;
+        foreach(int ancestor in ancestorIds) if(ancestor==1148) return true;
+        return false;
+    }
+    // Returns 0 unless exactly one candidate exists, or exactly one of several is visible.
+    public static long ChooseFilenameCandidate(long[] handles,bool[] visible) {
+        if(handles==null || visible==null || handles.Length!=visible.Length || handles.Length==0) return 0;
+        if(handles.Length==1) return handles[0];
+        long only=0;int count=0;
+        for(int i=0;i<handles.Length;i++) if(visible[i]){only=handles[i];count++;}
+        return count==1 ? only : 0;
+    }
+    public static int ControlId(long handle) { return GetDlgCtrlID(new IntPtr(handle)); }
+    // Bounded diagnostic of a dialog's input controls; no text content is read.
+    public static string[] DescribeDialogControls(long dialog) {
+        var rows=new List<string>();
+        EnumChildWindows(new IntPtr(dialog),delegate(IntPtr hwnd,IntPtr unused) {
+            if(rows.Count>=80) return false;
+            var name=new StringBuilder(256);GetClassName(hwnd,name,name.Capacity);
+            string cls=name.ToString();
+            if(cls!="Edit" && cls!="ComboBox" && cls!="ComboBoxEx32" && cls!="Button" && cls!="DirectUIHWND") return true;
+            IntPtr parent=GetParent(hwnd);
+            var parentName=new StringBuilder(256);
+            if(parent!=IntPtr.Zero) GetClassName(parent,parentName,parentName.Capacity);
+            rows.Add(cls+"|id="+GetDlgCtrlID(hwnd)+"|visible="+(IsWindowVisible(hwnd)?1:0)+"|parent="+parentName+":"+(parent==IntPtr.Zero?0:GetDlgCtrlID(parent)));
+            return true;
+        },IntPtr.Zero);
+        return rows.ToArray();
     }
     public static void SetDialogFilename(long edit,string filename) {
         IntPtr result;

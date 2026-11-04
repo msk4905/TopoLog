@@ -111,9 +111,9 @@ try {
     Start-Sleep -Milliseconds 200
     if($ownedDialog.ClassName -eq '#32770') {
         # Standard Windows common-save dialog control IDs are language-neutral.
-        $editHandle=[TopoLogWindowCapture]::FindDialogControl($ownedDialog.Handle,1001,'Edit')
+        $editHandle=[TopoLogWindowCapture]::FindFilenameControl($ownedDialog.Handle)
         [TopoLogWindowCapture]::SetDialogFilename($editHandle,$Destination)
-        $record.filename_control=[ordered]@{method='Win32 standard dialog control';control_id=1001;handle=$editHandle}
+        $record.filename_control=[ordered]@{method='Win32 standard dialog control';control_id=[TopoLogWindowCapture]::ControlId($editHandle);handle=$editHandle}
         $saveHandle=[TopoLogWindowCapture]::FindDialogControl($ownedDialog.Handle,1,'Button')
         $record.phase='save_image'
         [TopoLogWindowCapture]::ClickDialogButton($saveHandle)
@@ -150,6 +150,9 @@ try {
     Write-Host ('GNS3 native topology screenshot saved: '+$Destination)
 } catch {
     $record.error=$_.Exception.GetBaseException().Message
+    if($ownedDialog -and [string]$ownedDialog.ClassName -eq '#32770' -and $record.phase -eq 'fill_filename') {
+        try {$record['dialog_controls']=@([TopoLogWindowCapture]::DescribeDialogControls([long]$ownedDialog.Handle))} catch {}
+    }
     if($ownedDialog) {
         try {
             if($ownedDialog.ClassName -eq '#32770') {
