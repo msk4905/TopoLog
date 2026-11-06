@@ -172,7 +172,7 @@ def evaluate(rule, evidence, os_type):
         command = command_for(rule, os_type)
     except (ValueError, TypeError, KeyError) as exc:
         return {'status': 'inconclusive', 'reason': str(exc)}
-    item = next((x for x in evidence if x['command'] == command), None)
+    item = next((x for x in reversed(evidence) if x['command'] == command), None)
     if not item or item['status'] != 'collected' or item.get('cli_error'):
         return {'status': 'inconclusive', 'reason': 'Complete error-free evidence unavailable', 'command': command}
     text = body(item['text'], command)

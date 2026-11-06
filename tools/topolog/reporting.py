@@ -6,27 +6,39 @@ from pathlib import PurePosixPath
 from urllib.parse import quote
 from .features import LABELS
 
-STATUS = {'passed':'기준 충족','failed':'기준 불일치','inconclusive':'확인 필요',
-          'unverified':'미검증','collected':'수집 완료','completed':'처리 완료',
+STATUS = {'policy_limited':'방화벽 설정 참고','passed':'출력 정리','failed':'수집 실패','inconclusive':'수집 내용 확인',
+          'unverified':'원문 참조','collected':'수집 완료','completed':'처리 완료',
           'unsupported':'미지원','requires_privilege':'권한 필요','cancelled':'중지',
-          'not_run':'미실행','not_applicable':'판정 대상 아님','partial':'일부 수집','cleanup_failed':'복구 오류','error':'실행 오류','pending':'대기'}
+          'not_run':'미실행','not_applicable':'기본 구성','partial':'일부 수집','cleanup_failed':'복구 오류','error':'실행 오류','pending':'대기'}
 
 
 def esc(value):
-    return html.escape(str(value), quote=True)
+    from .findings import wording
+    return html.escape(wording(str(value)), quote=True)
 
 
 def badge(status):
-    kind = 'ok' if status in ('passed','collected','completed') else ('bad' if status in ('failed','error','cleanup_failed') else 'wait')
+    kind = 'info' if status=='policy_limited' else 'ok' if status in ('passed','collected','completed') else ('bad' if status in ('failed','error','cleanup_failed') else 'wait')
     return '<span class="badge '+kind+'">'+esc(STATUS.get(status,status or '확인 필요'))+'</span>'
 
 
 def link(path, label, download=False):
-    path = str(path).replace('\\','/')
+    from .security import relative_name
+    try:path = relative_name(str(path))
+    except ValueError:return esc(label)
     parts = PurePosixPath(path)
     if parts.is_absolute() or '..' in parts.parts or any(':' in p for p in parts.parts):
         return esc(label)
     return '<a '+('download ' if download else '')+'href="./'+quote(path, safe='/')+'">'+esc(label)+'</a>'
+
+
+def folder_link(path, label):
+    """Link that opens a folder of the result in the browser's file view (no download attribute)."""
+    path=str(path).strip('/')
+    parts=PurePosixPath(path)
+    if not path or parts.is_absolute() or '..' in parts.parts or any(':' in p for p in parts.parts):
+        return esc(label)
+    return '<a class="folder" href="./'+quote(path, safe='/')+'/">'+esc(label)+'</a>'
 
 
 def expectation(rule):
@@ -34,7 +46,7 @@ def expectation(rule):
     if kind=='interface_address': return rule.get('interface','')+' · '+rule.get('address','')
     if kind=='ospf_neighbors': return 'OSPF 이웃 FULL: '+', '.join(rule.get('neighbors',[]))
     if kind=='route': return '경로 '+rule.get('prefix','')+' · '+rule.get('protocol','')+(' · next hop '+rule['next_hop'] if rule.get('next_hop') else '')
-    if kind=='ping': return 'Ping '+rule.get('target','')+' · 성공률 '+str(rule.get('min_percent',100))+'% 이상'
+    if kind=='ping': return 'Ping '+rule.get('target','')+' · 응답 확인'
     if kind=='vlan_active': return 'VLAN '+str(rule.get('vlan',''))+' 활성'
     if kind=='trunk': return rule.get('interface','')+' · trunking'
     if kind=='hsrp': return rule.get('interface','')+' · HSRP '+str(rule.get('group',''))+' · '+rule.get('virtual_ip','')
@@ -43,15 +55,29 @@ def expectation(rule):
     if kind=='acl_binding': return rule.get('interface','')+' · ACL '+rule.get('acl','')+' · '+{'in':'수신','out':'송신'}.get(rule.get('direction'),'')
     if kind=='stp_instance': return 'VLAN '+str(rule.get('vlan',''))+' · STP 인스턴스 활성'
     if kind=='contains': return rule.get('command','')+' · '+', '.join(rule.get('expected',[]))
-    return json.dumps(rule,ensure_ascii=False) if rule else '검증 범위 확인'
+    # Internal linkage keys (node ids, scope notes) are kept in JSON, not in the readable text.
+    shown={k:v for k,v in rule.items() if k not in INTERNAL_RULE_KEYS} if rule else {}
+    return json.dumps(shown,ensure_ascii=False) if shown else '수집 내용'
+
+
+INTERNAL_RULE_KEYS=('origin_node','origin_interface','conditional','policy_context','diagnostic_flow')
+SCOPE_NOTES=('selective_redistribution','origin_inactive')
 
 
 def observation(value):
     if value is None: return '관측값 없음'
     if value == []: return '일치하는 항목 없음'
     if isinstance(value,list): return '\n'.join(observation(x) for x in value)
-    if isinstance(value,dict): return '\n'.join(str(k)+': '+observation(v) for k,v in value.items())
+    if isinstance(value,dict):
+        if 'success_percent' in value: return ('ping 성공' if value['success_percent'] >= 40 else ('응답 없음' if value['success_percent']==0 else '확인 보류'))
+        return '\n'.join(str(k)+': '+observation(v) for k,v in value.items())
     return str(value)
+
+
+def ping_observation(check):
+    value=check.get('observed') or {}
+    label='ping 성공' if check.get('status')=='passed' else ('응답 없음' if value.get('success_percent')==0 else '확인 보류')
+    return label+(' · '+check['reason'] if check.get('reason') else '')
 
 
 CSS = '''
@@ -66,7 +92,7 @@ main{max-width:1288px;padding:28px 24px 64px;margin:auto}h2{font-size:23px;margi
 .metric{padding:18px 22px}.metric strong{display:block;font-size:32px;line-height:1.3}.metric span,.muted{color:var(--muted)}
 .note{background:#e9f2f3;border-left:4px solid var(--accent);padding:14px 18px;margin:18px 0;border-radius:4px}
 .downloads{display:flex;flex-wrap:wrap;gap:12px}.downloads a{background:white;border:1px solid var(--border);border-radius:7px;padding:8px 14px;text-decoration:none}
-.badge{display:inline-block;font-size:13px;font-weight:650;line-height:1.5;padding:3px 10px;border-radius:20px;white-space:nowrap}.ok{color:#166443;background:#e4f3eb}.wait{color:#85540c;background:#fff1d8}.bad{color:#a52b3d;background:#fde9ed}
+.info{color:#36566e;background:#eaf1f6}.badge{display:inline-block;font-size:13px;font-weight:650;line-height:1.5;padding:3px 10px;border-radius:20px;white-space:nowrap}.ok{color:#166443;background:#e4f3eb}.wait{color:#85540c;background:#fff1d8}.bad{color:#a52b3d;background:#fde9ed}
 .panel{overflow:hidden}.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left}th{background:#f0f4f8;font-size:14px;color:#506277}th,td{padding:13px 16px;vertical-align:top;border-bottom:1px solid var(--border)}tbody tr:last-child td{border-bottom:0}
 .project{margin:20px 0;overflow:hidden}.project>summary{padding:20px 22px;font-size:21px;font-weight:700;cursor:pointer}.project>summary .badge{margin-left:12px}
 .project-body{padding:0 22px 22px}.chips{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 18px}.chip{background:#eef3f7;border:1px solid var(--border);border-radius:6px;padding:3px 10px;font-size:14px}
@@ -84,77 +110,111 @@ def render(report, files):
     # hidden as before instead of being shown as excluded.
     projects=[{**p,'nodes':[n for n in p.get('nodes',[]) if not (n.get('node_type') in ('ethernet_switch','ethernet_hub','cloud','nat','frame_relay_switch','atm_switch') and n.get('collection')=='not_applicable')]} for p in report.get('projects',[])]
     nodes=[n for p in projects for n in p.get('nodes',[])]
-    statuses=Counter(c['status'] for n in nodes for c in n.get('checks',[]))
-    unverified=sum(statuses[k] for k in ('unverified','inconclusive'))
     title='TopoLog · 실습 수집 보고서'
-    out=['<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="topolog-report-format" content="structured-html-v1"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+title+'</title><style>'+CSS+'</style></head><body>',
-         '<header><div class="brand">TOPOLOG / COLLECTION REPORT</div><h1>실습 수집 보고서</h1><p>프로젝트별 구성과 검증 근거를 한곳에서 확인합니다.</p></header><main>',
+    out=['<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="topolog-report-format" content="structured-html-v1"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; script-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; img-src &#39;self&#39; data: file:; connect-src &#39;none&#39;; object-src &#39;none&#39;; frame-src &#39;none&#39;; base-uri &#39;self&#39; file:; form-action &#39;none&#39;"><title>'+title+'</title><style>'+CSS+'</style></head><body>',
+         '<header><div class="brand">TOPOLOG / COLLECTION REPORT</div><h1>실습 수집 보고서</h1><p>프로젝트별 설정과 수집 출력을 기능별로 정리합니다.</p></header><main>',
          '<div class="metrics">']
-    for number,label in ((len(projects),'프로젝트'),(len(nodes),'전체 장비'),(statuses['passed'],'충족한 검증 조건'),(unverified,'미검증·판정 불가 조건')):
+    for number,label in ((len(projects),'프로젝트'),(len(nodes),'전체 장비'),
+                         (sum(n.get('collection')=='collected' for n in nodes),'수집 완료 장비'),
+                         (sum(p.get('topology_images',{}).get('native',{}).get('status')=='captured' for p in projects),'GNS3 토폴로지 사진')):
         out.append('<div class="metric"><strong>'+str(number)+'</strong><span>'+label+'</span></div>')
-    out+=['</div><div class="note">전체 판정 '+badge(report.get('verdict'))+
-          ' <span class="muted">실패 조건 '+str(statuses['failed'])+'개 · 수집 완료 '+str(sum(n.get('collection')=='collected' for n in nodes))+'대</span><br>기준 충족은 검사한 조건의 충족을 의미합니다. 미지원·미검증 항목은 아래에서 별도로 확인하세요.</div>',
-          '<p class="muted">수집 시작 '+esc(report.get('started_at','기록 없음'))+' · 종료 '+esc(report.get('finished_at','기록 없음'))+
+    out+=['</div><p class="muted">수집 시작 '+esc(report.get('started_at','기록 없음'))+' · 종료 '+esc(report.get('finished_at','기록 없음'))+
           ' · 실행 버전 '+esc(report.get('runtime',{}).get('version','이전 실행 · 버전 기록 없음'))+'</p>']
     if report.get('assessment'):
-        out.append('<div class="note">기존 증거 재판정 · '+esc(report['assessment']['assessed_at'])+'<br>장비를 새로 실행한 결과가 아닙니다.</div>')
-    entries=[('report.docx','Word 보고서'),('report-document.md','보고서(Markdown)')] if 'report.docx' in files else []
-    out.append('<nav class="downloads">'+''.join(link(p,l,True) for p,l in entries+[('report.md','Markdown 검증 기록'),('summary.json','전체 결과 JSON'),('ai_prompt.md','AI 편집 프롬프트'),('manifest.json','파일 무결성 목록')])+'</nav>')
-    out.append('<h2>프로젝트 요약</h2><div class="panel scroll"><table><thead><tr><th>프로젝트</th><th>처리 상태</th><th>판정</th><th>장비</th></tr></thead><tbody>')
+        out.append('<div class="note">기존 수집 자료 정리 · '+esc(report['assessment']['assessed_at'])+'<br>장비를 새로 실행한 결과가 아닙니다.</div>')
+    from .naming import report_files
+    names=report_files(report)
+    from .resultdir import prefix
+    # Records (evidence, JSON, Markdown) sit one folder down; the report, Word file and pictures stay at the top.
+    inner=prefix(report)
+    word=names['word'] if names['word'] in files else 'report.docx'
+    document=inner+(names['document'] if inner+names['document'] in files else 'report-document.md')
+    record=inner+(names['record'] if inner+names['record'] in files else 'report.md')
+    entries=[(word,'Word 보고서'),(document,'보고서(Markdown)')] if word in files else []
+    if names['annotated_word'] in files:entries.insert(1,(names['annotated_word'],'Word 보고서(주석본)'))
+    from .gallery import FOLDER as PICTURES
+    folders=[(PICTURES,'토폴로지 사진 폴더')] if any(f.startswith(PICTURES+'/') for f in files) else []
+    if inner:folders.append((inner,'수집 기록 폴더'))
+    if folders:out.append('<nav class="downloads folders">'+''.join(folder_link(p,'📁 '+l) for p,l in folders)+'</nav>')
+    out.append('<nav class="downloads">'+''.join(link(p,l,True) for p,l in entries+[(record,'Markdown 수집 기록'),(inner+'summary.json','전체 결과 JSON'),('ai_prompt.md','AI 편집 프롬프트'),(inner+'manifest.json','파일 무결성 목록')])+'</nav>')
+    from .findings import collection_rows as rows
+    findings=rows(report)
+    if report.get('selection',{}).get('project_ids') is not None:out.append('<p class="note">선택 범위의 새 수집 결과입니다. 선택한 프로젝트의 자료를 정리했습니다.</p>')
+    if findings:
+        out.append('<h2>수집 메모</h2><div class="panel scroll"><table><tr><th>프로젝트</th><th>장비</th><th>구분</th><th>대상</th><th>확인할 내용</th><th>근거 파일</th></tr>')
+        for row in findings:out.append('<tr>'+''.join('<td>'+esc(v)+'</td>' for v in row)+'</tr>')
+        out.append('</table></div>')
+    out.append('<h2>프로젝트 요약</h2><div class="panel scroll"><table><thead><tr><th>프로젝트</th><th>처리 상태</th><th>장비</th></tr></thead><tbody>')
     for index,p in enumerate(projects):
-        out.append('<tr><td><a href="#project-'+str(index)+'">'+esc(p.get('name',p.get('file','프로젝트')))+'</a></td><td>'+badge(p.get('status'))+'</td><td>'+badge(p.get('verdict','inconclusive'))+'</td><td>'+str(len(p.get('nodes',[])))+'대</td></tr>')
+        out.append('<tr><td><a href="#project-'+str(index)+'">'+esc(p.get('name',p.get('file','프로젝트')))+'</a></td><td>'+badge(p.get('status'))+'</td><td>'+str(len(p.get('nodes',[])))+'대</td></tr>')
     out.append('</tbody></table></div><h2>프로젝트별 상세</h2>')
     for index,p in enumerate(projects):
-        out.append('<details class="project" id="project-'+str(index)+'" open><summary>'+esc(p.get('name',p.get('file','프로젝트')))+badge(p.get('verdict','inconclusive'))+'</summary><div class="project-body">')
+        out.append('<details class="project" id="project-'+str(index)+'" open><summary>'+esc(p.get('name',p.get('file','프로젝트')))+badge(p.get('status'))+'</summary><div class="project-body">')
+        if p.get('project_id') and any(f.startswith(inner+str(p['project_id'])+'/') for f in files):
+            out.append('<p class="small">'+folder_link(inner+str(p['project_id']),'📁 이 프로젝트의 수집 원문 폴더')+'</p>')
         images=p.get('topology_images',{})
         out.append('<div class="topology-tabs" role="group" aria-label="토폴로지 사진">')
-        for key,label,selected in [('native','실제 GNS3 스크린샷',True),('reconstructed','재구성 토폴로지',False)]:
+        tabs=[('native','실제 GNS3 스크린샷',True),('reconstructed','재구성 토폴로지',False)]
+        if (images.get('annotated') or {}).get('status')=='generated':tabs.insert(1,('annotated','자동 주석 사진',False))
+        for key,label,selected in tabs:
             ident='topology-'+str(index)+'-'+key;item=images.get(key,{})
             out.append('<input class="tab-radio" type="radio" name="topology-'+str(index)+'" id="'+ident+'"'+(' checked' if selected else '')+'><label class="tab-label" for="'+ident+'">'+label+'</label><div class="tab-panel">')
-            file=item.get('file');path=str(p.get('project_id',''))+'/'+str(file or '')
+            file=item.get('file');path=inner+str(p.get('project_id',''))+'/'+str(file or '')
+            from .gallery import planned
+            collected_copy=planned(report).get((p.get('project_id'),key))
+            if file and collected_copy and collected_copy in set(files or []):path=collected_copy
+            from .security import relative_name
+            try:relative_name(path)
+            except ValueError:file=None
             if file and item.get('status') in ('captured','generated') and '..' not in PurePosixPath(path).parts and ':' not in path:
                 out.append('<img class="topology-image" alt="'+label+'" src="./'+quote(path,safe='/')+'"><p>'+link(path,'사진 내려받기',True)+'</p>')
             else:out.append('<p class="muted">'+esc(item.get('reason','이 실행에는 이미지가 없습니다. 새 수집에서 생성합니다.'))+'</p>')
-            out.append('<p class="small">'+('GNS3 자체 Screenshot 기능의 이미지입니다. 내용은 직접 확인하세요.' if key=='native' else 'API 좌표와 연결로 구성한 그림이며 실제 스크린샷과 구분합니다.')+'</p></div>')
+            note={'native':'GNS3 자체 Screenshot 기능의 이미지입니다. 내용은 직접 확인하세요.',
+                  'annotated':'GNS3 사진의 사본에 수집한 설정의 서브넷·cost와 제목을 TopoLog가 덧붙인 그림입니다. 원래 사진은 첫 번째 탭입니다.'}
+            out.append('<p class="small">'+note.get(key,'API 좌표와 연결로 구성한 그림이며 실제 스크린샷과 구분합니다.')+'</p></div>')
         out.append('</div>')
         features=sorted({f for n in p.get('nodes',[]) for f in n.get('analysis',{}).get('features',[])})
         if features:out.append('<div class="chips">'+''.join('<span class="chip">'+esc(LABELS.get(f,f))+'</span>' for f in features)+'</div>')
+        if p.get('gns3_project_name'):out.append('<p class="muted">'+esc('GNS3에 등록된 프로젝트 이름: '+p['gns3_project_name'])+'</p>')
         for reason in [p.get('reason'),p.get('recovery_hint')]+p.get('cleanup_errors',[]):
             if reason:out.append('<p class="error">'+esc(reason)+'</p>')
         for node in p.get('nodes',[]):
             checks=node.get('checks',[]);counts=Counter(c['status'] for c in checks)
             expanded = ' open' if node is p['nodes'][0] else ''
             switch=node.get('node_type') in ('ethernet_switch','ethernet_hub','cloud','nat','frame_relay_switch','atm_switch')
-            detail=('기본 동작 스위치' if node.get('switch_profile')=='default' else 'GNS3 내장 스위치 · 포트 설정 있음' if node.get('switch_profile')=='configured' else ('GNS3 내장 노드 · '+str(node.get('platform') or '')) if node.get('switch_profile')=='builtin' else 'GNS3 내장 스위치') if switch else node.get('platform','unknown').upper()+' · 충족 '+str(counts['passed'])+' · 불일치 '+str(counts['failed'])+' · 미확인 '+str(counts['unverified']+counts['inconclusive'])
+            detail=('기본 동작 스위치' if node.get('switch_profile')=='default' else 'GNS3 내장 스위치 · 포트 설정 있음' if node.get('switch_profile')=='configured' else ('GNS3 내장 노드 · '+str(node.get('platform') or '')) if node.get('switch_profile')=='builtin' else 'GNS3 내장 스위치') if switch else node.get('platform','unknown').upper()
             out.append('<details class="node"'+expanded+'><summary><strong>'+esc(node.get('name','장비'))+'</strong>'+badge(node.get('collection'))+' <span class="muted">'+esc(detail)+'</span></summary><div class="node-body">')
             if switch:
                 if node.get('reason'):out.append('<p class="small">'+esc(node['reason'])+'</p>')
                 if node.get('evidence_file'):
-                    path=str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(node['evidence_file'])
+                    path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(node['evidence_file'])
                     out.append('<p class="small">포트 설정(API): '+link(path,'보기')+' · '+link(path,'다운로드',True)+'</p>')
             for reason in ([] if switch else [node.get('reason')])+[node.get('recovery_hint')]+node.get('cleanup_errors',[]):
                 if reason:out.append('<p class="error">'+esc(reason)+'</p>')
             startup=node.get('startup_configuration',{})
             if startup:
-                path=str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(startup.get('file','startup.cfg'))
+                path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(startup.get('file','startup.cfg'))
                 out.append('<p class="small">저장 설정: '+(link(path,'startup.cfg 보기') if startup.get('status')=='collected' else '미수집')+
                            ' · 출처 '+esc(startup.get('source','—'))+'</p>')
             if node.get('privilege'):
                 out.append('<p class="small">EXEC 권한 전환: '+('성공' if node['privilege'].get('elevated') else '실패')+
                            ' · 원래 권한 복원 '+esc(node['privilege'].get('restoration','변경 없음'))+'</p>')
             if checks:
-                out.append('<div class="scroll"><table class="checks"><thead><tr><th>기대 조건</th><th>관측값·미확인 사유</th><th>판정</th><th>근거</th></tr></thead><tbody>')
+                out.append('<div class="scroll"><table class="checks"><thead><tr><th>설정·확인 내용</th><th>수집 출력 요약</th><th>근거</th></tr></thead><tbody>')
                 for check in checks:
-                    rule=check.get('criterion',{});expected=expectation(rule) if rule else LABELS.get(check.get('feature'), '검증 범위 확인')
-                    actual=observation(check['observed']) if 'observed' in check else check.get('reason','관측값은 근거 파일을 확인하세요.')
-                    evidence=check.get('evidence');path=str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(evidence)
-                    out.append('<tr><td>'+esc(expected)+('<div class="small">자동 도출 · '+esc(check['basis'])+'</div>' if check.get('basis') else '')+'</td><td class="value">'+esc(actual)+'</td><td>'+badge(check['status'])+'</td><td>'+(link(path,'보기')+' · '+link(path,'다운로드',True) if evidence else '—')+'</td></tr>')
+                    rule=check.get('criterion',{});expected=expectation(rule) if rule else LABELS.get(check.get('feature'), '수집 내용')
+                    actual='관련 설정·원문 참조' if check.get('status')=='unverified' else ping_observation(check) if isinstance(check.get('observed'),dict) and 'success_percent' in check['observed'] else observation(check['observed']) if 'observed' in check else check.get('reason','관측값은 근거 파일을 확인하세요.')
+                    if check.get('classification') in SCOPE_NOTES and 'success_percent' not in (check.get('observed') if isinstance(check.get('observed'),dict) else {}):
+                        actual+=' · '+check.get('reason','')
+                    evidence=check.get('evidence');path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(evidence)
+                    extra=''.join('<br>'+link(inner+str(p.get('project_id',''))+'/'+str(e['node_id'])+'/'+str(e['file']),e.get('label','ASA 근거'),True) for e in check.get('additional_evidence',[]))
+                    out.append('<tr><td>'+esc(expected)+''+'</td><td class="value">'+esc(actual)+'</td><td>'+(link(path,'보기')+' · '+link(path,'다운로드',True) if evidence else '—')+'</td></tr>')
                 out.append('</tbody></table></div>')
             out.append('<details class="raw"><summary>원본 명령과 상세 기록</summary><ul>')
             for command in node.get('commands',[]):
-                path=str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(command.get('file',''))
+                path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(command.get('file',''))
                 out.append('<li>'+link(path,command['command'])+' · '+link(path,'다운로드',True)+' '+badge(command.get('status'))+'</li>')
-            record=str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/collection.json'
+            record=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/collection.json'
             out.append('</ul>'+link(record,'장비 상세 JSON')+'</details></div></details>')
         if not p.get('nodes'):out.append('<p class="muted">수집된 장비가 없습니다. 처리 상태와 오류 기록을 확인하세요.</p>')
         for missing in p.get('missing_rule_nodes',[]):out.append('<p class="error">기준 대상 장비 없음: '+esc(missing)+'</p>')

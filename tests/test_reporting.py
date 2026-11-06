@@ -25,8 +25,8 @@ class ReportTests(unittest.TestCase):
         self.assertIn('table',parser.tags)
         self.assertIn('details',parser.tags)
         self.assertIn('./project/node/01.txt',parser.links)
-        self.assertIn('기대 조건',text)
-        self.assertIn('관측값',text)
+        self.assertIn('설정·확인 내용',text)
+        self.assertIn('수집 출력 요약',text)
         self.assertNotIn('# TopoLog 일괄',text)
         self.assertIn('OSPF 이웃 FULL: 2.2.2.2',text)
 

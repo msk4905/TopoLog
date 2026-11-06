@@ -34,7 +34,8 @@ class PreflightTests(unittest.TestCase):
         api = API(vm_connected=False)
         start = Mock(side_effect=lambda exe: setattr(api, 'vm_connected', True))
         record = preflight.prepare(lambda: api, True, is_running=lambda: False,
-                                   find_executable=lambda: Path('C:/GNS3/gns3.exe'), start=start, gui_timeout=2, vm_timeout=2)
+                                   find_executable=lambda: Path('C:/GNS3/gns3.exe'), start=start, gui_timeout=10, vm_timeout=2,
+                                   window_titles=lambda: ['GNS3'])      # no real window listing in tests
         start.assert_called_once()
         self.assertTrue(record['launched'])
         self.assertEqual(record['gns3_vm'], {'enabled': True, 'connected': True})
@@ -74,7 +75,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_default_vm_wait_is_short(self):
         import inspect
-        self.assertIn("90 if record['launched'] else 60", inspect.getsource(preflight.prepare))
+        self.assertIn("90 if record['launched'] else 60", inspect.getsource(preflight._prepare))
 
     def test_projects_need_vm_reads_compute_ids(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -93,6 +94,22 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             preflight.prepare(lambda: API(up=False), True, is_running=lambda: False,
                               find_executable=lambda: Path('gns3.exe'), start=Mock(), gui_timeout=1)
+
+    def test_client_initialization_failure_does_not_wait_for_server(self):
+        factory = Mock(side_effect=FileNotFoundError('missing TLS policy file'))
+        record = {}
+        with self.assertRaisesRegex(RuntimeError, 'FileNotFoundError'):
+            preflight.prepare(factory, True, is_running=lambda: True, record=record)
+        factory.assert_called_once()
+        self.assertEqual(record['controller'], 'initialization_failed')
+
+    def test_authentication_error_does_not_wait_for_server(self):
+        from urllib.error import HTTPError
+        api = Mock()
+        api.call.side_effect = HTTPError('http://localhost', 401, 'Unauthorized', {}, None)
+        with self.assertRaisesRegex(ValueError, '401'):
+            preflight.prepare(lambda: api, True, is_running=lambda: True)
+        api.call.assert_called_once_with('/v2/version')
 
     def test_unknown_platform_keeps_previous_behaviour(self):
         start = Mock()
@@ -122,15 +139,39 @@ class PreflightTests(unittest.TestCase):
     def test_progress_prefix_is_shown_plainly(self):
         self.assertEqual(progress.message('Preflight: GNS3를 실행합니다.'), 'GNS3를 실행합니다.')
 
-    def test_auto_start_choice_is_remembered(self):
+    def test_fresh_launch_waits_for_the_window_and_a_stable_server(self):
+        api = API()
+        answers = iter([True, False, True, True, True, True, True])     # one refusal right after the first answer
+        windows = iter([[], ['GNS3'], ['GNS3'], ['GNS3'], ['GNS3'], ['GNS3'], ['GNS3']])
+        class Flaky(API):
+            def call(self, path, method='GET', body=None):
+                if path == '/v2/version' and not next(answers, True):
+                    raise OSError('connection refused')
+                return super().call(path, method, body)
+        flaky = Flaky()
+        record = preflight.prepare(lambda: flaky, True, is_running=lambda: False, find_executable=lambda: Path('gns3.exe'),
+                                   start=Mock(), gui_timeout=20, vm_timeout=2, window_titles=lambda: next(windows, ['GNS3']))
+        self.assertTrue(record['launch_settle']['settled'])
+        self.assertGreaterEqual(record['launch_settle']['stable_checks'], preflight.STABLE_CHECKS)
+
+    def test_running_gns3_is_not_held_by_the_launch_wait(self):
+        record = preflight.prepare(lambda: API(), True, is_running=lambda: True, window_titles=lambda: [])
+        self.assertNotIn('launch_settle', record)
+
+    def test_auto_start_is_fixed_on_and_old_false_setting_is_migrated(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); projects = root / 'p'; projects.mkdir(); file = root / 's.json'
             self.assertTrue(settings.load(file)['auto_start_gns3'])
-            settings.save(projects, root / 'out', file, auto_start_gns3=False)
-            self.assertFalse(settings.load(file)['auto_start_gns3'])
-            settings.save(projects, root / 'out', file)
-            self.assertFalse(json.loads(file.read_text(encoding='utf-8'))['auto_start_gns3'])
-
+            file.write_text(json.dumps({'project_directory': str(projects), 'auto_start_gns3': False}), encoding='utf-8')
+            loaded = settings.load(file)
+            self.assertTrue(loaded['auto_start_gns3'])
+            self.assertTrue(loaded['migrated_auto_start'])
+            settings.save(projects, root / 'out', file, auto_start_gns3=False, detail_scope='all', allow_enable=False)
+            saved = json.loads(file.read_text(encoding='utf-8'))
+            self.assertNotIn('auto_start_gns3', saved)
+            self.assertEqual(saved['detail_scope'], 'all')
+            self.assertIs(saved['allow_enable'], False)
+            self.assertTrue(settings.load(file)['auto_start_gns3'])
 
 if __name__ == '__main__':
     unittest.main()

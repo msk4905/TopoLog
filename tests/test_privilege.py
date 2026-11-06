@@ -109,7 +109,7 @@ class PrivilegeTests(unittest.TestCase):
                    'show running-config':[b'ASA Version 9.9\r\nhostname ASA\r\nasa#'],
                    'show startup-config':[b'ASA Version 9.9\r\nhostname ASA\r\nasa#'],
                    'show pager':[b'pager lines 24\r\nasa#'],'terminal pager 0':[b'asa#'],'terminal pager 24':[b'asa#']}
-        for cmd in ('show interface ip brief','show route','show access-list','show nat'):
+        for cmd in ('show interface ip brief','show route','show access-list','show nat','show logging'):
             responses[cmd]=[b'example operational output\r\nasa#']
         sock=AuthSocket(responses)
         with tempfile.TemporaryDirectory() as temp:

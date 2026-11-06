@@ -52,8 +52,10 @@ MANAGEMENT = re.compile(r'^(?:upgrade |voice |default-value |username |enable |a
 
 def interface_key(value):
     value = value.lower()
+    # 'show standby brief' abbreviates Vlan1 to Vl1 and Tunnel0 to Tu0.
     for long, short in [('fastethernet','fa'),('gigabitethernet','gi'),('tengigabitethernet','te'),
-                        ('ethernet','eth'),('serial','se'),('loopback','lo'),('port-channel','po')]:
+                        ('ethernet','eth'),('serial','se'),('loopback','lo'),('port-channel','po'),
+                        ('vlan','vl'),('tunnel','tu')]:
         value = value.replace(long, short)
     return value
 
@@ -160,8 +162,8 @@ def evaluate(rule, evidence, platform):
     if rule['kind'] in ('ospf_neighbors','route','ping','contains'):
         return profiles.evaluate(rule,evidence,platform)
     command = rule['command']
-    item = next((x for x in evidence if x['command']==command and x['status']=='collected' and not x.get('cli_error')),None)
-    if not item: return {'status':'inconclusive','reason':'자동 검증에 필요한 명령 증거가 없습니다.','command':command}
+    item = next((x for x in reversed(evidence) if x['command']==command),None)
+    if not item or item.get('status')!='collected' or item.get('cli_error'): return {'status':'inconclusive','reason':'자동 검증에 필요한 명령 증거가 없습니다.','command':command}
     text = profiles.body(item['text'],command)
     observed = None
     if rule['kind'] in ('dhcp_pool','static_nat','acl_binding','stp_instance'):
@@ -231,10 +233,11 @@ def apply(project, specifications=None):
     nodes = project.get('nodes',[]); specs = specifications or {}
     analyses, parsed, linked = _prepare(project)
     derived, pings = verify.derive(project, parsed, linked)
+    states = {n['node_id']: verify.interface_states(n.get('commands', [])) for n in nodes}
     for node in nodes:
         analysis=analyses.get(node['node_id'])
         if not analysis:
-            _vpcs_and_ping(node, pings.get(node['node_id'], []), specs)
+            _vpcs_and_ping(node, pings.get(node['node_id'], []), specs, states)
             continue
         node['analysis']=analysis; automatic=[]; covered=set()
         def add(rule,feature,reason):
@@ -307,7 +310,7 @@ def apply(project, specifications=None):
                     add({'kind':'route','prefix':prefix,'protocol':'R'},'rip','동일 연결 RIP 도메인의 상대 설정에 광고된 원격 prefix, 직접 연결 제외')
         for feature,rule,basis in derived.get(node['node_id'],[]):
             automatic.append({'criterion':rule,'origin':'configuration','basis':basis,'feature':feature,
-                              **verify.evaluate(rule,node.get('commands',[]),node)})
+                              **verify.qualify(verify.evaluate(rule,node.get('commands',[]),node),rule,states)})
             covered.add(feature)
             if feature=='routing':covered.update(f for f in ('ospf','rip','eigrp','isis') if f in analysis['features'])
             if feature=='redistribution':covered.add('redistribution')
@@ -315,7 +318,7 @@ def apply(project, specifications=None):
             for rule in pings.get(node['node_id'],[]):
                 automatic.append({'criterion':rule,'origin':'configuration','feature':'reachability',
                                   'basis':'라우팅 도메인으로 경로가 있어야 하는 원격 장비 주소로의 ping · 정책 차단 가능 시 판정 보류',
-                                  **verify.evaluate(rule,node.get('commands',[]),node)})
+                                  **verify.qualify(verify.evaluate(rule,node.get('commands',[]),node),rule,states)})
         for feature in analysis['features']:
             if feature not in covered:
                 automatic.append({'status':'unverified','origin':'configuration','feature':feature,
@@ -330,7 +333,7 @@ def _ran_reachability(node):
     return bool(node.get('reachability')) or any(c.get('phase')=='reachability' for c in node.get('commands',[]))
 
 
-def _vpcs_and_ping(node, pings, specs):
+def _vpcs_and_ping(node, pings, specs, states=None):
     """VPCS: the saved startup address/gateway and pings from the host."""
     from . import verify
     if node.get('platform')!='vpcs':return
@@ -343,7 +346,7 @@ def _vpcs_and_ping(node, pings, specs):
     if _ran_reachability(node):
         for rule in pings:
             automatic.append({'criterion':rule,'origin':'configuration','feature':'reachability','basis':'기본 게이트웨이와 원격 라우터 주소로의 ping',
-                              **verify.evaluate(rule,node.get('commands',[]),node)})
+                              **verify.qualify(verify.evaluate(rule,node.get('commands',[]),node),rule,states or {})})
     if automatic:
         node['automatic_checks']=automatic
         if not specs.get(node['node_id'],{}).get('checks'):node['checks']=automatic

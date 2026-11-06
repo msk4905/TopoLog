@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 [CmdletBinding()]
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$BatchArguments)
 $ErrorActionPreference='Stop'

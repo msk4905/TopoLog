@@ -27,8 +27,14 @@ try {
     }
     if(-not $target){throw 'The selected GNS3 screenshot action is no longer available.'}
     $result.status='invoking';Save-Result
+    $pattern=$null;$expanded=$false
+    # Menu bar items open their menu through ExpandCollapse; Invoke may only trigger the action.
+    if($request.expand -and $target.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$pattern)) {
+        try {$pattern.Expand();$expanded=$true;$result['method']='expand'} catch {$result['expand_error']=$_.Exception.GetBaseException().Message}
+    }
     $pattern=$null
-    if($target.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {$pattern.Invoke()}
+    if($expanded) {}
+    elseif($target.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$pattern)) {$pattern.Invoke()}
     else {
         $pattern=$null
         if(-not $target.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern,[ref]$pattern)){throw 'The selected GNS3 action cannot be invoked.'}

@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 # Synthetic API responses; no live server or development reference files used.
 param([string]$PythonExecutable='')
 $ErrorActionPreference='Stop'

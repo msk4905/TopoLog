@@ -124,6 +124,11 @@ def visible(text):
 
 
 class Console:
+    # Silence that ends a read: the generic wait before a prompt is accepted, and the
+    # shorter wait once the exact session prompt already ends the visible output.
+    IDLE_POLL = .25
+    PROMPT_QUIET = .05
+
     def __init__(self, host, port, ready_timeout=120, command_timeout=30, cancel=None, progress=None,
                  pager_retry=1.0, pager_retries=3):
         self.host, self.port = host, int(port)
@@ -142,12 +147,23 @@ class Console:
         if self.cancel and self.cancel.is_set():
             raise InterruptedError('Collection cancelled')
 
-    def _read(self, timeout, allow_password=False):
+    def _read(self, timeout, allow_password=False, expected=None):
+        try:
+            return self._read_until(timeout, allow_password, expected)
+        finally:
+            if expected and self.sock:
+                try:
+                    self.sock.settimeout(self.IDLE_POLL)
+                except OSError:
+                    pass
+
+    def _read_until(self, timeout, allow_password=False, expected=None):
         end = time.monotonic() + timeout
         received = bytearray()
         pages = 0
         page_key_at, page_resends = 0.0, 0
         next_update = time.monotonic() + 5
+        quiet = False
         while time.monotonic() < end:
             self._check_cancel()
             if time.monotonic() >= next_update:
@@ -170,6 +186,9 @@ class Console:
                 continue
             if not chunk:
                 raise ConnectionError('Console disconnected')
+            if quiet:
+                self.sock.settimeout(self.IDLE_POLL)
+                quiet = False
             self.wire.extend(chunk)
             if len(self.wire) > 8 * 1024 * 1024:
                 raise ValueError('Console receive limit exceeded')
@@ -193,6 +212,13 @@ class Console:
                 pages = count
                 page_key_at, page_resends = time.monotonic(), 0
                 self.progress('CLI pagination: page {}'.format(pages))
+            elif expected:
+                # The same prompt already closes the output: accept it after a short
+                # silence instead of the generic idle poll. Any further byte resets this.
+                match = PROMPT.search(visible(text))
+                if match and match.group(1) == expected:
+                    self.sock.settimeout(self.PROMPT_QUIET)
+                    quiet = True
         raise TimeoutError('Complete CLI prompt not received before timeout')
 
     def connect(self):
@@ -225,7 +251,7 @@ class Console:
             raise ValueError('Multiline commands are not accepted')
         self.awaiting_prompt = True
         self.sock.sendall((command + '\r\n').encode('ascii'))
-        text, prompt = self._read(self.command_timeout)
+        text, prompt = self._read(self.command_timeout, expected=self.prompt)
         if prompt != self.prompt:
             raise ValueError('Console prompt changed unexpectedly')
         self.awaiting_prompt = False

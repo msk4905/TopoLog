@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+from topolog.resultdir import records as R  # noqa: E402
 from topolog.engine import collect_node, Runner, load_rules, verdict
 from topolog.criteria import CriteriaDocument, make_rule, reassess
 from topolog.transport import Console
@@ -103,7 +104,7 @@ class RecoveryTests(unittest.TestCase):
             def cancelled(*args, **kwargs):
                 raise KeyboardInterrupt()
             output = root / 'out'
-            result = Runner(api, output, collector=cancelled, settle_seconds=0).run(labs)
+            result = Runner(api, output, collector=cancelled, settle_seconds=0, console_workers=1).run(labs)
             self.assertTrue(result['cancelled'])
             self.assertEqual(result['projects'][0]['status'], 'cancelled')
             self.assertEqual(result['projects'][1]['status'], 'not_run')
@@ -111,7 +112,7 @@ class RecoveryTests(unittest.TestCase):
             nodes = result['projects'][0]['nodes']
             self.assertEqual([n['collection'] for n in nodes], ['cancelled', 'not_run'])
             for node in nodes:
-                saved = json.loads((output / P / node['node_id'] / 'collection.json').read_text())
+                saved = json.loads((R(output) / P / node['node_id'] / 'collection.json').read_text())
                 self.assertEqual(saved, node)
 
 

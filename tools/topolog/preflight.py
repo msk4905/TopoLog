@@ -100,8 +100,39 @@ def vm_last_error(api):
     return None
 
 
-def prepare(api_factory, launch, progress=None, cancel=None, gui_timeout=180, vm_timeout=None, needs_vm=True,
-            is_running=gui_running, find_executable=gui_executable, start=launch_gui):
+def prepare(api_factory, launch, progress=None, cancel=None, gui_timeout=None, vm_timeout=None, needs_vm=True,
+            is_running=gui_running, find_executable=gui_executable, start=launch_gui, record=None, window_titles=None):
+    """Wrapper that returns the screen to the user's window after a launch, on any outcome."""
+    record = {} if record is None else record
+    state = {}
+    from . import winfocus
+    winfocus.remember_target(winfocus.snapshot())
+    try:
+        return _prepare(api_factory, launch, progress, cancel, gui_timeout, vm_timeout, needs_vm,
+                        is_running, find_executable, start, record, state, window_titles)
+    finally:
+        if 'before' in state:
+            from . import winfocus
+            record['focus_restore'] = winfocus.restore(state['before'])
+
+
+STABLE_CHECKS = 5
+
+
+def _launch_settled(reachable, window_titles, state):
+    """One polling step: the API object once the window exists and the server answered STABLE_CHECKS times in a row."""
+    titles = window_titles()
+    state['window_titles'] = titles
+    api = reachable()
+    if not api or titles == []:            # None: windows cannot be listed here, rely on the server checks
+        state['stable'] = 0
+        return None
+    state['stable'] = state.get('stable', 0) + 1
+    return api if state['stable'] >= STABLE_CHECKS else None
+
+
+def _prepare(api_factory, launch, progress, cancel, gui_timeout, vm_timeout, needs_vm,
+             is_running, find_executable, start, record, state, window_titles=None):
     """Make GNS3 ready. Returns a record of what was found and done.
 
     launch: True to start GNS3 when it is not running; False to only report.
@@ -109,7 +140,9 @@ def prepare(api_factory, launch, progress=None, cancel=None, gui_timeout=180, vm
     does not connect within vm_timeout, the run stops with a restart instruction.
     """
     progress = progress or (lambda message: None)
-    record = {'gui_running': is_running(), 'launched': False}
+    if window_titles is None:
+        from .winfocus import gns3_window_titles as window_titles
+    record.update({'gui_running': is_running(), 'launched': False})
     if record['gui_running'] is None:
         # Not Windows or process list unavailable: keep the previous behaviour.
         return record
@@ -118,18 +151,33 @@ def prepare(api_factory, launch, progress=None, cancel=None, gui_timeout=180, vm
         if not executable:
             raise ValueError('GNS3가 실행되어 있지 않고 설치된 gns3.exe를 찾지 못했습니다. GNS3를 직접 실행한 뒤 다시 시도하세요.')
         progress('Preflight: GNS3를 실행합니다. 연동 GNS3 VM은 GNS3 설정에 따라 함께 시작됩니다.')
+        from . import winfocus
+        state['before'] = winfocus.snapshot()
         start(executable)
         record.update(launched=True, executable=str(executable))
     elif record['gui_running'] is False:
         progress('Preflight: GNS3가 실행되어 있지 않습니다. 실제 GNS3 사진은 저장되지 않습니다.')
         return record
 
+    if vm_timeout is None:vm_timeout=90 if record['launched'] else 60
+    if gui_timeout is None:gui_timeout=vm_timeout
+
     def reachable():
         try:
             api = api_factory()
+        except Exception as exc:
+            record['controller'] = 'initialization_failed'
+            record['controller_error_type'] = type(exc).__name__
+            raise RuntimeError('GNS3 서버 연결 초기화 실패 (' + type(exc).__name__ +
+                               '). 프로그램 파일과 상세 기록을 확인하세요.') from exc
+        try:
             api.call('/v2/version')
             return api
-        except Exception:
+        except Exception as exc:
+            from urllib.error import HTTPError
+            if isinstance(exc, HTTPError) and exc.code in (401, 403):
+                raise ValueError('GNS3 서버 인증 확인이 필요합니다 (HTTP ' + str(exc.code) + ').') from exc
+            record['controller_error_type'] = type(exc).__name__
             return None
     api = _wait(reachable, gui_timeout if record['launched'] else 5, cancel, progress,
                 'Preflight: GNS3 서버 준비를 기다리는 중입니다 ({}초 남음).')
@@ -138,6 +186,17 @@ def prepare(api_factory, launch, progress=None, cancel=None, gui_timeout=180, vm
         if record['launched']:
             raise TimeoutError('GNS3를 실행했지만 서버가 준비되지 않았습니다. GNS3 창의 오류를 확인한 뒤 다시 시도하세요.')
         return record
+    if record['launched']:
+        # A freshly started GNS3 answers the API before its main window exists and can restart its
+        # local server once during start-up (seen as 'connection refused' right after the first answer).
+        # Continue only when the window is up and the server stayed reachable for a few seconds.
+        settled = _wait(lambda: _launch_settled(reachable, window_titles, state), gui_timeout, cancel, progress,
+                        'Preflight: GNS3 창과 서버가 안정될 때까지 기다리는 중입니다 ({}초 남음).', interval=1.0)
+        record['launch_settle'] = {'window': state.get('window_titles', []), 'stable_checks': state.get('stable', 0),
+                                   'settled': bool(settled)}
+        if not settled:
+            raise TimeoutError('GNS3를 실행했지만 GNS3 창이나 서버가 안정되지 않았습니다. GNS3 창의 오류를 확인한 뒤 다시 시도하세요.')
+        api = settled
     record['controller'] = 'ready'
     enabled, connected = vm_status(api)
     record['gns3_vm'] = {'enabled': enabled, 'connected': connected}

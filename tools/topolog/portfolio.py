@@ -2,7 +2,7 @@
 
 Layout follows the user's reference document: title and info table, overview,
 key skills, representative-project table, per-project sections (구성과 목적,
-GNS3 토폴로지, 주요 설정, 동작 원리, 검증 결과, 콘솔 검증 출력, 참고), the full
+GNS3 토폴로지, 주요 설정, 동작 원리, 검증 결과, 콘솔 출력, 참고), the full
 project list and evidence notes. Every statement about a project is generated
 from collected configuration and judged checks; fields the tool cannot know
 (e.g. 지원 분야) are left as clearly marked placeholders. Only the standard
@@ -75,7 +75,8 @@ PRINCIPLES = {
 # ---------------------------------------------------------------- data
 
 def _project_topology(output, project):
-    path = Path(output) / str(project.get('project_id', '')) / 'topology.json'
+    from .resultdir import records
+    path = records(output) / str(project.get('project_id', '')) / 'topology.json'
     try:
         return json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
@@ -136,10 +137,12 @@ def _checks(node):
 
 
 def _observed(check):
+    if check.get('status')=='unverified' and not check.get('observed'):return '관련 설정·원문 참조'
     value = check.get('observed')
     if isinstance(value, dict):
         if 'success_percent' in value:
-            return '{}% 응답'.format(value['success_percent'])
+            from .reporting import ping_observation
+            return ping_observation(check)
         return ', '.join('{} {}'.format(k, v) for k, v in value.items())
     return str(value) if value not in (None, '') else (check.get('reason') or '')
 
@@ -151,7 +154,6 @@ KIND_LABELS = {'interface_up': '인터페이스 상태', 'interface_address': '�
                'nat_interfaces': 'NAT 인터페이스', 'static_nat': '정적 NAT', 'acl_binding': 'ACL 적용', 'dhcp_pool': 'DHCP 풀',
                'stp_root': 'STP Root', 'stp_instance': 'STP 인스턴스', 'vtp_mode': 'VTP 모드', 'trunk': 'Trunk', 'vlan_active': 'VLAN',
                'hsrp': 'HSRP', 'ping': 'ping 도달성', 'vpcs_ip': 'PC 주소', 'ipv6_address': 'IPv6 주소'}
-STATUS_WORD = {'passed': '충족', 'failed': '미충족', 'inconclusive': '판정 보류', 'unverified': '미검증'}
 
 
 PER_DEVICE = ('ospf_neighbors', 'eigrp_neighbor', 'isis_neighbor', 'bgp_peer', 'ipv6_neighbor', 'isakmp_sa', 'ipsec_sa',
@@ -179,35 +181,14 @@ def _verification_rows(project):
         for name, items in units:
             command = next((c.get('command') for c in items if c.get('command')), '') or (items[0].get('criterion') or {}).get('command', '')
             status = Counter(c['status'] for c in items)
-            judged = '충족 {}/{}'.format(status['passed'], len(items))
-            extra = [STATUS_WORD[s] + ' ' + str(status[s]) for s in ('failed', 'inconclusive', 'unverified') if status[s]]
-            if extra:
-                judged += ' · ' + ', '.join(extra)
             text = _summary(kind, items) if kind in PER_DEVICE else _aggregate(kind, items, len(devices))
-            rows.append((name, command or '설정 분석', text + ' · ' + judged, kind, status))
+            rows.append((name, command or '설정 분석', text, kind, status))
     # Keep the table readable: relationship and result rows first, interface rows last.
     return rows[:MAX_ROWS]
 
 
 def _aggregate(kind, items, devices):
-    passed = [c for c in items if c['status'] == 'passed']
-    if kind in ('route_covered', 'route', 'route6_covered'):
-        codes = Counter(str(_observed(c)).split(' ')[0] for c in passed)
-        return '장비 {}대 · 원격 대역 경로 {}/{}'.format(devices, len(passed), len(items)) + \
-            (' (' + ', '.join('{} {}'.format(k, v) for k, v in codes.most_common()) + ')' if codes else '')
-    if kind == 'static_route':
-        return '정적 경로 {}개 중 {}개가 S 경로로 설치'.format(len(items), len(passed))
-    if kind == 'interface_up':
-        return '연결·Loopback·Tunnel 인터페이스 {}개 중 {}개 up/up'.format(len(items), len(passed))
-    if kind == 'interface_address':
-        return '설정 주소 {}개 중 {}개가 운영 출력과 일치'.format(len(items), len(passed))
-    if kind == 'ipv6_address':
-        return 'IPv6 주소 {}개 중 {}개 일치'.format(len(items), len(passed))
-    if kind == 'trunk':
-        return 'Trunk 포트 {}개 중 {}개 trunking'.format(len(items), len(passed))
-    if kind == 'vlan_active':
-        return 'VLAN {}개 중 {}개 active'.format(len(items), len(passed))
-    return _summary(kind, items)
+    return '장비 {}대 · '.format(devices)+_summary(kind,items)
 
 
 def _summary(kind, items):
@@ -223,16 +204,15 @@ def _summary(kind, items):
     if kind == 'bgp_peer':
         return 'BGP 피어 ' + ', '.join(r.get('address', '') for r in rules)
     if kind in ('route_covered', 'route', 'route6_covered'):
-        codes = Counter(str(_observed(c)).split(' ')[0] for c in passed)
-        return '원격 대역 {}개 중 {}개 경로 보유'.format(len(items), len(passed)) + (' (' + ', '.join('{} {}'.format(k, v) for k, v in codes.items()) + ')' if codes else '')
+        return '; '.join('{}: {}'.format(r.get('network',r.get('prefix',r.get('address',''))),_observed(c)) for r,c in zip(rules,items))[:400]
     if kind == 'static_route':
         return '정적 경로 ' + ', '.join(r.get('prefix', '') for r in rules)
     if kind == 'ping':
         return 'ping ' + ', '.join('{}({})'.format(r.get('target'), _observed(c)) for r, c in zip(rules, items))[:300]
     if kind == 'interface_up':
-        return '연결 인터페이스 {}개 up/up {}개'.format(len(items), len(passed))
+        return '; '.join('{}: {}'.format(r.get('interface',''),_observed(c)) for r,c in zip(rules,items))[:400]
     if kind == 'interface_address':
-        return '인터페이스 주소 {}개 일치 {}개'.format(len(items), len(passed))
+        return '; '.join('{}: {}'.format(r.get('interface',''),_observed(c)) for r,c in zip(rules,items))[:400]
     if kind == 'redistribution':
         return '재분배 ' + ', '.join('{} → {}'.format(r.get('source'), r.get('into')) for r in rules)
     if kind == 'isakmp_sa':
@@ -314,10 +294,13 @@ def _excerpt(text, cfg):
     return masked[:28]
 
 
-def _topic(project, topology):
+def _topic(project, topology, annotated=False):
     title = _title_from_drawings(topology)
     if title:
         return title
+    chosen = ((project.get('topology_images') or {}).get('annotated') or {})
+    if annotated and chosen.get('status') == 'generated' and chosen.get('title'):
+        return chosen['title']
     features = []
     for node in project.get('nodes', []):
         for f in _features(node):
@@ -327,33 +310,24 @@ def _topic(project, topology):
 
 
 def _headline(project):
-    """One-line key result for the overview table."""
-    parts = []
-    nodes = [n for n in project.get('nodes', []) if n.get('node_type') not in BUILTIN]
-    checks = [c for n in nodes for c in _checks(n)]
-    neighbors = [c for c in checks if (c.get('criterion') or {}).get('kind') in ('ospf_neighbors', 'eigrp_neighbor', 'isis_neighbor', 'bgp_peer', 'ipv6_neighbor')]
-    if neighbors:
-        parts.append('인접 관계 {}/{} 확인'.format(sum(c['status'] == 'passed' for c in neighbors), len(neighbors)))
-    routes = [c for c in checks if (c.get('criterion') or {}).get('kind') in ('route_covered', 'route6_covered', 'route', 'static_route')]
-    if routes:
-        parts.append('경로 {}/{} 확인'.format(sum(c['status'] == 'passed' for c in routes), len(routes)))
-    pings = [c for c in checks if (c.get('criterion') or {}).get('kind') == 'ping']
-    if pings:
-        parts.append('ping {}/{} 성공'.format(sum(c['status'] == 'passed' for c in pings), len(pings)))
-    other = [c for c in checks if c not in neighbors + routes + pings]
-    if other:
-        parts.append('기타 조건 {}/{} 충족'.format(sum(c['status'] == 'passed' for c in other), len(other)))
-    return ', '.join(parts) or '판정 조건 없음'
+    features=list(dict.fromkeys(f for n in project.get('nodes',[]) for f in _features(n)))
+    return ' · '.join(FEATURE_NAMES.get(f,f) for f in features[:5]) or '장비 설정·운영 출력 수집'
 
 
-def build(report, output, files=()):
-    """Document blocks for the whole report."""
+def build(report, output, files=(), annotated=False):
+    """Document blocks for the whole report.
+
+    annotated=False: GNS3 pictures as saved by GNS3 (the report made at collection time).
+    annotated=True: the TopoLog annotated copies and the titles chosen for them, where they exist."""
+    annotated_report = annotated
     output = Path(output)
+    from .security import validate_report_paths
+    validate_report_paths(report,output)
     projects = [p for p in report.get('projects', []) if p.get('status') in ('completed', 'cleanup_failed', 'error')]
     contexts = []
     for project in projects:
         topology = _project_topology(output, project)
-        contexts.append((project, topology, _topic(project, topology)))
+        contexts.append((project, topology, _topic(project, topology, annotated)))
     dates = sorted(d for p in projects for d in re.findall(r'(20\d{6})', p.get('name', '')))
     period = ('{}-{}-{} ~ {}-{}-{}'.format(dates[0][:4], dates[0][4:6], dates[0][6:], dates[-1][:4], dates[-1][4:6], dates[-1][6:])
               if dates else str(report.get('started_at', ''))[:10]) + ' (실습 프로젝트 {}개)'.format(len(projects))
@@ -374,21 +348,17 @@ def build(report, output, files=()):
                 platforms['GNS3 Cloud'] += 1
     all_features = Counter(f for p in projects for n in p.get('nodes', []) for f in _features(n))
     blocks = [('title', 'GNS3 네트워크 실습 프로젝트'),
-              ('subtitle', 'Cisco GNS3 기반 실습 · TopoLog 자동 수집·검증 결과'),
-              ('info', [('지원 분야', '[직접 입력]'), ('실습 기간', period),
+              ('subtitle', 'Cisco GNS3 기반 실습 · 설정 및 수집 내용'),
+              ('info', [('실습 기간', period),
                         ('실습 환경', 'GNS3, ' + ', '.join(sorted(platforms)) if platforms else 'GNS3'),
-                        ('검증 방법', '프로젝트마다 장비 설정·show 출력·ping 결과를 자동 수집하고, 설정과 연결에서 도출한 조건과 실제 출력을 대조')]),
+                        ('수집 내용', '프로젝트마다 장비 설정·show 출력·ping 결과를 수집하고 기능별로 분류')]),
               ('h1', '1. 프로젝트 개요', False)]
     feature_text = ', '.join(FEATURE_NAMES.get(f, f) for f, _ in all_features.most_common())
     total_checks = [c for p in projects for n in p.get('nodes', []) for c in _checks(n)]
     status = Counter(c['status'] for c in total_checks)
-    blocks.append(('p', 'GNS3 가상 환경의 프로젝트 {}개에서 장비를 자동으로 기동하고 설정과 운영 출력을 수집했다. 탐지한 구성은 {}이다.'
+    blocks.append(('p', 'GNS3 가상 환경의 프로젝트 {}개에서 장비를 기동하고 설정과 운영 출력을 수집했다. 탐지한 구성은 {}이다.'
                    .format(len(projects), feature_text or '기본 인터페이스 구성')))
-    blocks.append(('p', '각 프로젝트는 저장된 장비 설정과 콘솔 출력으로 결과를 확인했다. 인접 관계, 라우팅 테이블, 터널·SA, 변환 테이블처럼 설정이 실제로 '
-                   '반영되었는지 보여 주는 출력과 종단 간 ping 결과를 함께 기록했다. 자동 판정 조건 {}개 중 {}개를 충족했다{}.'
-                   .format(len(total_checks), status['passed'],
-                           ('(미충족 {}, 판정 보류 {}, 미검증 {})'.format(status['failed'], status['inconclusive'], status['unverified'])
-                            if status['failed'] or status['inconclusive'] or status['unverified'] else ''))))
+    blocks.append(('p', '각 프로젝트의 저장 설정과 수집한 콘솔 출력을 함께 정리했다. 인접 관계, 라우팅 테이블, 터널·SA, 변환 테이블과 ping 출력을 기능별로 연결했다.'))
     blocks.append(('h1', '2. 핵심 역량', False))
     for lead, keys, tail in SKILLS:
         present = [FEATURE_NAMES.get(k, k) for k in keys if all_features.get(k)]
@@ -399,11 +369,21 @@ def build(report, output, files=()):
                        'ssh': 'SSH 활성 상태', 'asa': 'ASA 인터페이스와 라우팅 참여'}
             tail = '를 구성하고 ' + ', '.join(checked[k] for k in keys if all_features.get(k)) + '를 확인했다.'
         blocks.append(('bullet', lead, (', '.join(present) + tail) if tail.startswith('를') else tail))
+    from .report_options import detail_scope
+    from .resultdir import records
+    scope = detail_scope(report, records(output))
+    # Representative = most distinct detected feature kinds (ties by name); a
+    # selection aid for a short document, not a ranking of importance.
     ranked = sorted(contexts, key=lambda c: (-len({f for n in c[0].get('nodes', []) for f in _features(n)}), c[0].get('name', '')))
-    representative = ranked[:MAX_REPRESENTATIVE]
+    representative = list(ranked) if scope == 'all' else ranked[:MAX_REPRESENTATIVE]
     representative.sort(key=lambda c: c[0].get('name', ''))
-    blocks.append(('h1', '3. 대표 프로젝트 한눈에 보기', False))
-    blocks.append(('table', ['No', '프로젝트', '주제', '핵심 검증 결과'], [
+    if scope == 'all':
+        blocks.append(('h1', '3. 프로젝트 한눈에 보기', False))
+        blocks.append(('p', '수집한 모든 프로젝트를 이름순으로 상세 정리했다.'))
+    else:
+        blocks.append(('h1', '3. 대표 프로젝트 한눈에 보기', False))
+        blocks.append(('p', '탐지한 기능 종류가 많은 프로젝트 최대 {}개를 골라 상세 정리했다. 중요도나 완성도를 평가한 선정이 아니며, 나머지 프로젝트의 수집 자료와 원문은 결과 폴더와 HTML 보고서에 그대로 있다.'.format(MAX_REPRESENTATIVE)))
+    blocks.append(('table', ['No', '프로젝트', '주제', '주요 구성'], [
         ['{:02d}'.format(i + 1), p.get('name', ''), topic, _headline(p)] for i, (p, _, topic) in enumerate(representative)],
         [500, 1450, 3100, 4588], set()))
     for index, (project, topology, topic) in enumerate(representative, 1):
@@ -413,13 +393,23 @@ def build(report, output, files=()):
         blocks.append(('meta', '프로젝트 {}  ·  {}'.format(project.get('name', ''), ' · '.join(parts + [link_text]))))
         blocks.append(('h2', '구성과 목적'))
         blocks.append(('p', _purpose(project, counts)))
-        image = output / str(project.get('project_id', '')) / 'capture' / 'gns3-topology.png'
+        from .gallery import path_for
+        from .resultdir import prefix
+        def gallery_source(report, project):
+            return prefix(report) + str(project.get('project_id', '')) + '/capture/gns3-topology.png'
+        image = output / (path_for(report, project, 'native', output) or (gallery_source(report, project)))
         native = (project.get('topology_images') or {}).get('native') or {}
-        if native.get('status') == 'captured' and image.is_file():
+        use_annotated = annotated_report
+        annotated = (project.get('topology_images') or {}).get('annotated') or {}
+        annotated_image = output / (path_for(report, project, 'annotated', output) or '')
+        if use_annotated and annotated.get('status') == 'generated' and native.get('status') == 'captured' and annotated_image.is_file():
+            blocks.append(('image', annotated_image))
+            blocks.append(('caption', '그림 {}-1. GNS3 토폴로지 (GNS3 자체 Screenshot 사본에 TopoLog가 서브넷·cost 주석 추가)'.format(number)))
+        elif native.get('status') == 'captured' and image.is_file():
             blocks.append(('image', image))
             blocks.append(('caption', '그림 {}-1. GNS3 토폴로지 (GNS3 자체 Screenshot)'.format(number)))
         else:
-            blocks.append(('note', '토폴로지', '이 실행에는 GNS3 자체 Screenshot이 없습니다. 재구성 그림(topology-reconstructed.svg)은 결과 폴더에 있습니다.'))
+            blocks.append(('note', '토폴로지', '이 실행에는 GNS3 자체 Screenshot이 없습니다. 재구성 그림은 결과 폴더의 토폴로지_사진/재구성_그림에 있습니다.'))
         configs = _key_config(project)
         if configs:
             blocks.append(('h2', '주요 설정'))
@@ -437,35 +427,41 @@ def build(report, output, files=()):
             for f in present[:3]:
                 blocks.append(('p', PRINCIPLES[f]))
         rows = _verification_rows(project)
-        blocks.append(('h2', '검증 결과'))
+        blocks.append(('h2', '수집 출력'))
         if rows:
             blocks.append(('table', ['장비', '명령', '확인 결과'], [[r[0], r[1], r[2]] for r in rows[:14]], [1100, 2900, 5638], set()))
         else:
-            blocks.append(('p', '자동 판정 조건이 없습니다. 원문 출력은 결과 폴더에 보존되어 있습니다.'))
+            blocks.append(('p', '원문 출력은 결과 폴더에 보존되어 있습니다.'))
         console = _console_excerpt(project)
         if console:
             blocks.append(('code', console))
-            blocks.append(('caption', '그림 {}-2. 콘솔 검증 출력 (수집 원문 발췌, 화면 캡처 아님)'.format(number)))
+            blocks.append(('caption', '그림 {}-2. 콘솔 출력 (수집 원문 발췌)'.format(number)))
         notes = _notes(project)
         if notes:
             blocks.append(('note', '참고', notes))
     blocks.append(('h1', '4. 전체 실습 목록', True))
-    blocks.append(('p', '수집한 {}개 프로젝트를 이름순으로 정리했다. 대표 사례로 소개한 프로젝트는 음영으로 표시했으며, 모든 프로젝트의 설정·출력·판정 근거는 결과 폴더에 보관되어 있다.'
+    blocks.append(('p', ('수집한 {}개 프로젝트를 이름순으로 정리했다. 모든 프로젝트의 설정·수집 출력은 결과 폴더에 보관되어 있다.' if scope == 'all' else
+                         '수집한 {}개 프로젝트를 이름순으로 정리했다. 상세 정리한 프로젝트는 음영으로 표시했으며, 모든 프로젝트의 설정·수집 출력은 결과 폴더에 보관되어 있다.')
                    .format(len(contexts))))
     rows, shaded = [], set()
     rep_ids = {p.get('project_id') for p, _, _ in representative}
     for i, (project, topology, topic) in enumerate(sorted(contexts, key=lambda c: c[0].get('name', ''))):
         parts, _, _, _ = _device_counts(project, topology)
         rows.append([project.get('name', ''), topic, ' · '.join(parts)])
-        if project.get('project_id') in rep_ids:
+        if project.get('project_id') in rep_ids and scope != 'all':
             shaded.add(i)
     blocks.append(('table', ['프로젝트', '실습 주제', '장비 구성'], rows, [1500, 5000, 3138], shaded))
     blocks.append(('h1', '5. 증빙 자료', False))
     blocks.append(('bullet', '장비 설정', '프로젝트별 GNS3 프로젝트 정보와 장비의 running-config·startup-config, VPCS 설정 파일'))
-    blocks.append(('bullet', '실행 검증', 'TopoLog 결과 폴더({}): 프로젝트별 GNS3 자체 토폴로지 사진, show·ping 원문, 판정 근거(summary.json, collection.json)'
-                   .format(output.name)))
-    blocks.append(('bullet', '주소 정보', '문서의 IP 주소는 실습용 값이다. 암호·키 값은 문서에서 가렸으며 공개 전 원문 파일의 민감한 값도 확인해야 한다.'))
-    return blocks
+    blocks.append(('bullet', '수집 자료', 'TopoLog 결과 폴더({}): 토폴로지_사진 폴더(GNS3 자체 사진·재구성 그림 구분), show·ping 원문과 수집 기록(summary.json, collection.json){}'
+                   .format(output.name, '은 수집_기록 폴더' if report.get('records_dir') else '')))
+    from .findings import collection_rows as rows
+    findings=rows(report)
+    if findings:
+        blocks.append(('h1','수집 메모',False))
+        for row in findings:blocks.append(('p',' / '.join(str(v) for v in row)))
+    from .findings import wording
+    return [wording(b) if b[0] != 'code' else b for b in blocks]
 
 
 def _purpose(project, counts):
@@ -483,7 +479,7 @@ def _purpose(project, counts):
     asa = [n.get('name') for n in nodes if n.get('platform') == 'asa']
     if asa:
         text += ' {}는 Cisco ASA로 내부·외부 구간을 나눈다.'.format(', '.join(asa))
-    return text + ' 실습 목적: [직접 입력]'
+    return text
 
 
 def _console_excerpt(project):
@@ -502,7 +498,10 @@ def _console_excerpt(project):
                 continue
             body = [l.rstrip() for l in profiles.body(item['text'], item['command']).splitlines() if l.strip()]
             if item['command'].startswith('ping '):
-                body = [l for l in body if 'Success rate' in l or l.startswith(('!', '.')) or 'bytes from' in l][:3]
+                check=next((c for c in _checks(node) if c.get('command')==item['command']),None)
+                if not check: continue
+                from .reporting import ping_observation
+                body = ['결과 요약: '+ping_observation(check)]
             lines.append('{}# {}'.format(node.get('name'), item['command']))
             lines.extend(body[:8])
         if len(lines) > 34:
@@ -511,24 +510,18 @@ def _console_excerpt(project):
 
 
 def _notes(project):
-    items = []
-    for node in project.get('nodes', []):
-        for check in _checks(node):
-            if check['status'] in ('failed', 'inconclusive', 'unverified'):
-                rule = check.get('criterion') or {}
-                kind = rule.get('kind') or check.get('feature') or ''
-                what = KIND_LABELS.get(kind, FEATURE_NAMES.get(kind, kind or '조건'))
-                items.append('{} {} {}({})'.format(node.get('name'), what, STATUS_WORD.get(check['status']), (check.get('reason') or _observed(check))[:80]))
-    if not items:
-        return ''
-    head = '자동 판정에서 충족하지 않았거나 판정을 보류한 조건 {}건: '.format(len(items))
-    return head + '; '.join(items[:6]) + (' 외 {}건'.format(len(items) - 6) if len(items) > 6 else '') + '. 상세 근거는 HTML 보고서와 collection.json에 있다.'
+    return ''
 
 
 # ---------------------------------------------------------------- docx
 
+# Console output can carry BEL/ESC and other bytes that XML 1.0 forbids; one such
+# character makes Word reject the whole document.
+_XML_INVALID = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]')
+
+
 def _esc(text):
-    return html.escape(str(text), quote=False)
+    return html.escape(_XML_INVALID.sub('', str(text)), quote=False)
 
 
 def _run(text, size=20, bold=False, color=None, font=FONT):
@@ -730,8 +723,9 @@ def write_markdown(blocks, destination, output):
         elif kind == 'code':
             lines += ['```'] + block[1] + ['```', '']
         elif kind == 'image':
+            import os
             try:
-                relative = Path(block[1]).relative_to(output).as_posix()
+                relative = Path(os.path.relpath(Path(block[1]), Path(destination).parent)).as_posix()
             except ValueError:
                 relative = Path(block[1]).name
             lines += ['![]({})'.format(relative), '']
@@ -742,9 +736,30 @@ def write_markdown(blocks, destination, output):
     Path(destination).write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
-def write(report, output, files=()):
-    """Create report.docx and report-document.md in output; returns their names."""
-    blocks = build(report, output, files)
-    write_docx(blocks, Path(output) / 'report.docx')
-    write_markdown(blocks, Path(output) / 'report-document.md', output)
-    return ['report.docx', 'report-document.md']
+def has_annotated(report):
+    return any(((p.get('topology_images') or {}).get('annotated') or {}).get('status') == 'generated'
+               for p in report.get('projects', []))
+
+
+def write(report, output, files=(), original=True):
+    """Create collection-dated Word and Markdown documents; return their names.
+
+    The collection-time report keeps the GNS3 pictures as GNS3 saved them. When annotated copies
+    exist, a separate Word report (…_주석본.docx) is made from them; saving titles later rewrites
+    only that one (original=False)."""
+    from .naming import report_files
+    from .resultdir import records
+    names=report_files(report)
+    written=[]
+    if original:
+        blocks = build(report, output, files)
+        write_docx(blocks, Path(output) / names['word'])
+        write_markdown(blocks, records(output) / names['document'], output)
+        written += [names['word'],names['document']]
+    target = Path(output) / names['annotated_word']
+    if has_annotated(report):
+        write_docx(build(report, output, files, annotated=True), target)
+        written.append(names['annotated_word'])
+    elif target.exists():
+        target.unlink()
+    return written

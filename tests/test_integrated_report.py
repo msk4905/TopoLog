@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
+from topolog.resultdir import records as R  # noqa: E402
 from topolog import services
 from topolog.topology import reconstruct,capture_native
 from topolog.reporting import render
@@ -28,17 +29,18 @@ class IntegratedTests(unittest.TestCase):
             with patch('topolog.topology.capture_native',side_effect=native):
                 result=Runner(API(),root/'out',collector=collected,settle_seconds=0,capture=True).run(labs)
             self.assertEqual(result['projects'][0]['status'],'completed')
-            self.assertTrue((root/'out'/P/'topology-reconstructed.svg').is_file())
-            self.assertTrue((root/'out'/P/M/'switch-ports.json').is_file())
+            self.assertTrue((R(root/'out')/P/'topology-reconstructed.svg').is_file())
+            self.assertTrue((R(root/'out')/P/M/'switch-ports.json').is_file())
             switch=next(n for n in result['projects'][0]['nodes'] if n['node_id']==M)
             self.assertEqual(switch['collection'],'collected')
             self.assertEqual(result['projects'][0]['verdict'],'passed')
             html=(root/'out'/'index.html').read_text(encoding='utf-8')
             self.assertIn('BasicSwitch',html)
             self.assertIn('기본 동작 스위치',html)
-            self.assertTrue((root/'out'/'report.docx').is_file())
+            self.assertEqual(len(list((root/'out').glob('report(*).docx'))),1)
             self.assertFalse((root/'out'/'report-document-error.txt').exists())
-            self.assertIn('report.docx',html)
+            from urllib.parse import quote
+            self.assertIn(quote(next((root/'out').glob('report(*).docx')).name),html)
             self.assertIn(P+'/capture/gns3-topology.png',html)
 
     def test_native_success_requires_exporter_record_and_png(self):

@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 function Get-TopoLogPythonCandidates {
     param([Parameter(Mandatory=$true)][string]$SourceRoot)
     $names=[Collections.Generic.List[string]]::new()

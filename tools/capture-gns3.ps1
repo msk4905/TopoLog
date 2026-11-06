@@ -4,7 +4,9 @@ param(
     [string]$ProjectName = '20260827-1',
     [string]$ProjectFile = '',
     [ValidateSet('Native','PrintWindow','Screen')][string]$Method = 'Native',
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [long]$RestoreWindowHandle = 0,
+    [int]$RestoreWindowProcessId = 0
 )
 
 $ErrorActionPreference='Stop'
@@ -37,12 +39,25 @@ $metadata=[ordered]@{
     region='GNS3 window client area'; error=$null
     note='A window screenshot is not a verdict on network operation. The viewport may not show every node; review the image.'
 }
+# Window the user had in front, restored after GNS3 was raised for this capture.
+$foregroundBefore=[TopoLogWindowCapture]::ForegroundHandle()
+$metadata['foreground_before']=$foregroundBefore
+$beforeName=[TopoLogWindowCapture]::ProcessNameOf([TopoLogWindowCapture]::WindowProcessId($foregroundBefore))
+if($beforeName -in @('gns3','vmware','vmplayer','vmware-vmx','VirtualBox','VirtualBoxVM') -and $RestoreWindowHandle -ne 0 -and
+   [TopoLogWindowCapture]::WindowProcessId($RestoreWindowHandle) -eq $RestoreWindowProcessId) {
+    $foregroundBefore=$RestoreWindowHandle
+    $metadata['focus_target_reused']=$true
+}
+$metadata['focus_target']=$foregroundBefore
+$focusTarget=$null;$startedMinimized=$false
 try {
     $windows=@([TopoLogWindowCapture]::List())
     $candidates=@($windows | Where-Object {[TopoLogWindowCapture]::TitleMatches($_.Title,$ProjectName)})
+    if($candidates.Count -eq 1){$focusTarget=$candidates[0];$startedMinimized=[bool]$candidates[0].Minimized}
     if($candidates.Count -eq 0 -and $ProjectFile) {
         $idle=@($windows | Where-Object {$_.Title.Trim() -eq 'GNS3'})
         if($idle.Count -ne 1) {throw 'Keep one idle GNS3 window open for batch screenshots. An unrelated open project will not be replaced.'}
+        $focusTarget=$idle[0];$startedMinimized=[bool]$idle[0].Minimized
         # A freshly started GNS3 shows its modal startup chooser; cancel only that dialog.
         $startup=@([TopoLogWindowCapture]::FindStartupProjectDialogs($idle[0].Handle,$idle[0].ProcessId))
         if($startup.Count -eq 1) {
@@ -53,7 +68,29 @@ try {
             if(@([TopoLogWindowCapture]::FindStartupProjectDialogs($idle[0].Handle,$idle[0].ProcessId)).Count -gt 0){throw 'The GNS3 startup Project dialog did not close.'}
         } elseif($startup.Count -gt 1) {throw 'More than one GNS3 Project dialog is open.'}
         $metadata['open_project_record']='open-project.json'
-        & (Join-Path $PSScriptRoot 'open-gns3-project.ps1') -WindowHandle $idle[0].Handle -Gns3ProcessId $idle[0].ProcessId -ProjectFile $ProjectFile -ProjectName $ProjectName -RecordDirectory $OutputDirectory
+        for($openAttempt=1;;$openAttempt++) {
+            try {
+                & (Join-Path $PSScriptRoot 'open-gns3-project.ps1') -WindowHandle $idle[0].Handle -Gns3ProcessId $idle[0].ProcessId -ProjectFile $ProjectFile -ProjectName $ProjectName -RecordDirectory $OutputDirectory
+                break
+            } catch {
+                # One more attempt only when GNS3 simply stayed idle: no message box,
+                # no other GNS3 window and no other project title. The first record is kept.
+                $openRecord=Join-Path $OutputDirectory 'open-project.json'
+                $retry=$false
+                if($openAttempt -eq 1 -and (Test-Path -LiteralPath $openRecord)) {
+                    $first=Get-Content -LiteralPath $openRecord -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $stillIdle=@([TopoLogWindowCapture]::List() | Where-Object {$_.Handle -eq $idle[0].Handle -and $_.Title.Trim() -eq 'GNS3'}).Count -eq 1
+                    $others=@([TopoLogWindowCapture]::ListProcessWindows($idle[0].ProcessId) | Where-Object {$_.Handle -ne $idle[0].Handle}).Count
+                    if($first.phase -eq 'wait_project_loaded' -and $stillIdle -and $others -eq 0) {
+                        Move-Item -LiteralPath $openRecord -Destination (Join-Path $OutputDirectory 'open-project-attempt1.json')
+                        $metadata['open_retry']='first open stayed idle without a GNS3 message; retried once'
+                        $retry=$true
+                    }
+                }
+                if(-not $retry){throw}
+                Start-Sleep -Seconds 2
+            }
+        }
         $windows=@([TopoLogWindowCapture]::List())
         $candidates=@($windows | Where-Object {[TopoLogWindowCapture]::TitleMatches($_.Title,$ProjectName)})
     }
@@ -78,7 +115,7 @@ try {
         $metadata.note='GNS3 exported the topology scene using its own Screenshot action. Image content requires visual review and is not a verdict on network operation.'
         $metadata['native_export_record']='native-export.json'
         $nativeRecord=Join-Path $OutputDirectory 'native-export.json'
-        & (Join-Path $PSScriptRoot 'export-gns3-screenshot.ps1') -WindowHandle $window.Handle -Gns3ProcessId $window.ProcessId -Destination $path -RecordPath $nativeRecord
+        & (Join-Path $PSScriptRoot 'export-gns3-screenshot.ps1') -WindowHandle $window.Handle -Gns3ProcessId $window.ProcessId -Destination $path -RecordPath $nativeRecord -ProjectName $ProjectName
         $native=Get-Content -LiteralPath $nativeRecord -Raw -Encoding UTF8 | ConvertFrom-Json
         if($native.status -ne 'saved') {throw ('GNS3 native screenshot export failed: '+$native.error)}
         $image=[Drawing.Bitmap]::new($path)
@@ -99,8 +136,17 @@ try {
     Write-Host ('Image: '+$path)
 } catch {
     $metadata.error=$_.Exception.GetBaseException().Message
+    # Which program was in front when it failed: helps tell a user switch from a GNS3 delay.
+    try {
+        $front=[TopoLogWindowCapture]::ForegroundHandle()
+        $metadata['foreground_at_failure']=[TopoLogWindowCapture]::ProcessNameOf([TopoLogWindowCapture]::WindowProcessId($front))
+    } catch {}
     Write-Warning $metadata.error
 } finally {
+    if($focusTarget) {
+        try {$metadata['focus_restore']=[TopoLogWindowCapture]::RestoreForeground($foregroundBefore,[int]$focusTarget.ProcessId,[long]$focusTarget.Handle,$startedMinimized)}
+        catch {$metadata['focus_restore']='failed: '+$_.Exception.GetBaseException().Message}
+    }
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'capture.json'),($metadata|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
     Write-Host ('Capture record: '+(Join-Path $OutputDirectory 'capture.json'))
 }

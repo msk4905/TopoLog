@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+from topolog.resultdir import records as R  # noqa: E402
 from topolog import profiles, settings
 from topolog.engine import Runner, collect_node, discover, draft, error_detail, load_rules, verdict, wait_computes
 from topolog.transport import Console, TelnetCodec
@@ -408,7 +409,7 @@ class EngineTests(unittest.TestCase):
             self.assertNotIn(('/v2/projects/' + P + '/close', 'POST', None), api.calls)
             self.assertEqual(report['verdict'], 'inconclusive')
             self.assertNotIn('<router>', (root / 'out/index.html').read_text(encoding='utf-8'))
-            manifest = json.loads((root / 'out/manifest.json').read_text(encoding='utf-8'))
+            manifest = json.loads((R(root / 'out') / 'manifest.json').read_text(encoding='utf-8'))
             with zipfile.ZipFile(str(root / 'out') + '.zip') as archive:
                 self.assertIsNone(archive.testzip())
                 for item in manifest['files']:

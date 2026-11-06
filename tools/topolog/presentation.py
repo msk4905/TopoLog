@@ -19,26 +19,45 @@ def stage_directory(parent):
     finally:shutil.rmtree(stage)
 
 
-def refresh_report(folder):
-    folder=Path(folder).resolve(strict=True)
-    report=json.loads((folder/'summary.json').read_text(encoding='utf-8'))
+def refresh_report(folder, detail_scope=None, original_documents=True):
+    """Rebuild the presentation. original_documents=False (after choosing picture titles) leaves the
+    collection-time Word/Markdown documents untouched and rewrites only the annotated Word report,
+    the picture folder, the HTML report, the manifest and the ZIP."""
+    from .resultdir import top
+    folder=top(Path(folder).resolve(strict=True))
+    from .security import ensure_tree,validate_report_paths
+    ensure_tree(folder)
+    from .resultdir import records,prefix
+    data=records(folder)
+    report=json.loads((data/'summary.json').read_text(encoding='utf-8'))
     if report.get('schema')!='topolog-batch-v2' or not report.get('finished_at'):
         raise ValueError('완료된 TopoLog 일괄 결과 폴더를 선택하세요.')
+    validate_report_paths(report,folder)
+    if detail_scope is not None:
+        from .report_options import save as save_options
+        save_options(data,detail_scope)
     from . import portfolio
-    try:portfolio.write(report,folder)
-    except Exception as exc:(folder/'report-document-error.txt').write_text('{}: {}'.format(type(exc).__name__,exc),encoding='utf-8')
+    from .engine import write_collection_record,write_ai_prompt
+    from . import gallery
+    gallery.build(report,folder)
+    if original_documents:
+        write_collection_record(folder,report)
+        write_ai_prompt(folder,report)
+    try:portfolio.write(report,folder,original=original_documents)
+    except Exception as exc:(data/'report-document-error.txt').write_text('{}: {}'.format(type(exc).__name__,exc),encoding='utf-8')
     files=sorted(p for p in folder.rglob('*') if p.is_file())
     if any(p.is_symlink() for p in files):raise ValueError('Linked evidence files are not supported')
-    names=sorted({p.relative_to(folder).as_posix() for p in files}|{'index.html','manifest.json'})
+    manifest_name=prefix(report)+'manifest.json'
+    names=sorted({p.relative_to(folder).as_posix() for p in files}|{'index.html',manifest_name})
     content=render(report,names).encode('utf-8')
     manifest={'files':[]}
     for name in names:
-        if name=='manifest.json':continue
-        data=content if name=='index.html' else (folder/name).read_bytes()
-        manifest['files'].append({'path':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+        if name==manifest_name:continue
+        body=content if name=='index.html' else (folder/name).read_bytes()
+        manifest['files'].append({'path':name,'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest()})
     manifest_bytes=json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8')
     archive=Path(str(folder)+'.zip')
-    targets=[folder/'index.html',folder/'manifest.json',archive]
+    targets=[folder/'index.html',folder/manifest_name,archive]
     with stage_directory(folder.parent) as stage:
         for i,target in enumerate(targets):
             if target.exists():shutil.copyfile(target,stage/('old'+str(i)))
@@ -46,7 +65,7 @@ def refresh_report(folder):
         with zipfile.ZipFile(stage/'new2','w',zipfile.ZIP_DEFLATED) as z:
             for name in names:
                 if name=='index.html':z.writestr(name,content)
-                elif name=='manifest.json':z.writestr(name,manifest_bytes)
+                elif name==manifest_name:z.writestr(name,manifest_bytes)
                 else:z.write(folder/name,name)
         with zipfile.ZipFile(stage/'new2') as z:
             if z.testzip():raise OSError('Presentation ZIP integrity check failed')

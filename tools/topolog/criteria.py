@@ -77,16 +77,21 @@ class CriteriaDocument:
 
 def reassess(source, output, criteria_path=None):
     """No API or console access; original run stays unchanged."""
-    source, output = Path(source).resolve(strict=True), Path(output).resolve()
+    from .resultdir import RECORDS, records, top
+    source, output = top(Path(source).resolve(strict=True)), Path(output).resolve()
     if output == source or output.is_relative_to(source):
         raise ValueError('재판정 결과는 원본 결과 폴더 밖에 저장하세요.')
     if output.exists() or Path(str(output) + '.zip').exists():
         raise FileExistsError('Assessment output exists')
     rules = load_rules(criteria_path)
-    original = (source / 'summary.json').read_bytes()
+    from .security import ensure_tree,validate_report_paths
+    ensure_tree(source)
+    source_data = records(source)
+    original = (source_data / 'summary.json').read_bytes()
     report = json.loads(original)
     if report.get('schema') != 'topolog-batch-v2':
         raise ValueError('TopoLog 일괄 결과 폴더를 선택하세요.')
+    validate_report_paths(report,source)
     for project in report['projects']:
         if project.get('project_id'):
             guid(project['project_id'])
@@ -95,18 +100,27 @@ def reassess(source, output, criteria_path=None):
     # Do not follow externally linked evidence into a new export.
     if any(p.is_symlink() for p in source.rglob('*')):
         raise ValueError('Symbolic links in evidence are not supported')
-    generated = {'summary.json', 'index.html', 'report.md', 'ai_prompt.md', 'manifest.json'}
-    shutil.copytree(source, output, ignore=lambda folder, names: list(generated & set(names)) if Path(folder) == source else [])
+    from .naming import is_generated_report
+    from .gallery import FOLDER
+    from .report_options import FILE as OPTIONS
+    # Evidence and title choices are copied into the new records folder; reports and pictures are made again.
+    generated = {p.name for p in source_data.iterdir() if is_generated_report(p.name)} | {
+        'summary.json', 'index.html', 'report.md', 'ai_prompt.md', 'manifest.json', 'findings.md', 'criteria-used.json',
+        FOLDER, OPTIONS, RECORDS, 'report-document-error.txt'}
+    output.mkdir(parents=True)
+    data = output / RECORDS
+    shutil.copytree(source_data, data, ignore=lambda folder, names: list(generated & set(names)) if Path(folder) == source_data else [])
+    report['records_dir'] = RECORDS
     report['assessment'] = {'assessed_at': now(), 'source_directory': str(source),
                             'source_summary_sha256': hashlib.sha256(original).hexdigest()}
-    save(output / 'criteria-used.json', json.loads(Path(criteria_path).read_text(encoding='utf-8-sig')) if criteria_path else {'schema':'topolog-rules-v1','projects':{}})
+    save(data / 'criteria-used.json', json.loads(Path(criteria_path).read_text(encoding='utf-8-sig')) if criteria_path else {'schema':'topolog-rules-v1','projects':{}})
     report['unmatched_rule_projects'] = sorted(set(rules) - {p.get('project_id') for p in report['projects']})
     for project in report['projects']:
         pid = project.get('project_id')
         spec = rules.get(pid, {})
         expected = spec.get('nodes', {})
         project['missing_rule_nodes'] = sorted(set(expected) - {n['node_id'] for n in project.get('nodes', [])})
-        saved_topology = source / str(pid) / 'topology.json'
+        saved_topology = source_data / str(pid) / 'topology.json'
         saved_nodes = {}
         if saved_topology.is_file():
             try:
@@ -121,8 +135,8 @@ def reassess(source, output, criteria_path=None):
                 # Re-derived only from the settings saved at collection time.
                 node.update(describe_builtin(saved_nodes.get(node['node_id'], node)))
                 if node.get('switch_ports') is not None:
-                    save(output / pid / node['node_id'] / 'switch-ports.json', {'source': 'saved topology.json node properties.ports_mapping', 'ports': node['switch_ports']})
-                save(output / pid / node['node_id'] / 'collection.json', node)
+                    save(data / pid / node['node_id'] / 'switch-ports.json', {'source': 'saved topology.json node properties.ports_mapping', 'ports': node['switch_ports']})
+                save(data / pid / node['node_id'] / 'collection.json', node)
                 continue
             node_spec = expected.get(node['node_id'], {})
             checks = node_spec.get('checks', [])
@@ -132,13 +146,13 @@ def reassess(source, output, criteria_path=None):
                               for check in checks]
             if not checks:
                 node['checks'] = [{'status': 'unverified', 'reason': 'No explicit expected behavior configured'}]
-            save(output / pid / node['node_id'] / 'collection.json', node)
-        topology_path = source / str(pid) / 'topology.json'
+            save(data / pid / node['node_id'] / 'collection.json', node)
+        topology_path = source_data / str(pid) / 'topology.json'
         if not project.get('topology_links') and topology_path.is_file():
             project['topology_links'] = json.loads(topology_path.read_text(encoding='utf-8'))['links']
         if topology_path.is_file():
             from .topology import reconstruct
-            reconstruct(json.loads(topology_path.read_text(encoding='utf-8')),output/pid/'topology-reconstructed.svg')
+            reconstruct(json.loads(topology_path.read_text(encoding='utf-8')),data/pid/'topology-reconstructed.svg')
             images=project.setdefault('topology_images',{})
             images['reconstructed']={'status':'generated','file':'topology-reconstructed.svg','kind':'API 좌표·연결 기반 재구성'}
             images.setdefault('native',{'status':'unavailable','reason':'기존 결과에 실제 GNS3 사진이 없습니다. 새 수집이 필요합니다.'})
@@ -146,21 +160,21 @@ def reassess(source, output, criteria_path=None):
         features.apply(project, expected)
         for node in project.get('nodes', []):
             if node.get('node_type') in BUILTIN_TYPES:continue
-            save(output / pid / node['node_id'] / 'collection.json', node)
-        if pid and (output / pid).is_dir():
-            save(output / pid / 'auto-criteria.json', {'schema':'topolog-auto-v1', 'nodes':
+            save(data / pid / node['node_id'] / 'collection.json', node)
+        if pid and (data / pid).is_dir():
+            save(data / pid / 'auto-criteria.json', {'schema':'topolog-auto-v1', 'nodes':
                  {n['node_id']:n.get('automatic_checks',[]) for n in project.get('nodes',[]) if n.get('node_type') not in BUILTIN_TYPES}})
         project['verdict'] = verdict(project.get('nodes', []))
         if project['missing_rule_nodes'] and project['verdict'] != 'failed':
             project['verdict'] = 'inconclusive'
-        if pid and (output / pid).is_dir():
-            save(output / pid / 'result.json', project)
+        if pid and (data / pid).is_dir():
+            save(data / pid / 'result.json', project)
     report['verdict'] = 'inconclusive'
     if any(p.get('verdict') == 'failed' for p in report['projects']):
         report['verdict'] = 'failed'
     elif (report['projects'] and not report.get('cancelled') and not report['unmatched_rule_projects']
           and all(p['status'] == 'completed' and p['verdict'] == 'passed' for p in report['projects'])):
         report['verdict'] = 'passed'
-    save(output / 'summary.json', report)
+    save(data / 'summary.json', report)
     export(output, report)
     return report

@@ -43,7 +43,8 @@ def parse(config, platform='ios'):
     config = re.sub(r'<--- More ---> {0,14}', '', config)
     result = {'platform': platform, 'hostname': None, 'interfaces': [], 'processes': [], 'static': [], 'static6': [],
               'redistribute': [], 'crypto_peers': [], 'bgp': [], 'ssh': False, 'nat_inside': [], 'nat_outside': [],
-              'pat': False, 'vtp_mode': None, 'stp_priority': {}, 'ipv6_routing': False}
+              'pat': False, 'vtp_mode': None, 'stp_priority': {}, 'ipv6_routing': False,
+              'redistribute_filters': {}}
     block, interface, process = None, None, None
     for raw in config.splitlines():
         line = raw.strip()
@@ -66,7 +67,7 @@ def parse(config, platform='ios'):
                 family = 6 if line.startswith('ipv6 ') else 4
                 process = {'protocol': m[1], 'id': m[2], 'family': family, 'networks': [], 'passive': set(),
                            'passive_default': False, 'active': set(), 'redistribute': [], 'neighbors': [],
-                           'router_id': None, 'ipv6_af': False}
+                           'router_id': None, 'ipv6_af': False, 'distribute_list': False}
                 result['processes'].append(process)
                 if m[1] == 'bgp':
                     result['bgp'].append(process)
@@ -111,6 +112,12 @@ def parse(config, platform='ios'):
             if m:
                 try:
                     interface['address'] = str(ipaddress.IPv4Interface(m[1] + '/' + m[2]))
+                except ValueError:
+                    pass
+            m = re.fullmatch(r'ipv6 address (fe80:\S*) link-local', line, re.I)
+            if m:
+                try:
+                    interface['link_local'] = str(ipaddress.IPv6Address(m[1]))
                 except ValueError:
                     pass
             m = re.fullmatch(r'ipv6 address (\S+/\d+)(?: eui-64)?', line, re.I)
@@ -162,6 +169,11 @@ def parse(config, platform='ios'):
                 family = 6 if process['ipv6_af'] else process['family']
                 process['redistribute'].append(tokens[1])
                 result['redistribute'].append((process['protocol'], family, tokens[1]))
+                reason = _selective(tokens)
+                if reason:
+                    result['redistribute_filters'][(process['protocol'], family, tokens[1])] = reason
+            elif tokens[0] == 'distribute-list':
+                process['distribute_list'] = True
             elif line == 'passive-interface default':
                 process['passive_default'] = True
             elif tokens[0] == 'passive-interface' and len(tokens) > 1:
@@ -195,11 +207,29 @@ def parse(config, platform='ios'):
             if k in process['passive'] or (process['passive_default'] and k not in process['active']):
                 interface['passive'].add(process['protocol'])
     for process in result['processes']:
+        if process['distribute_list']:
+            for protocol, family, source in result['redistribute']:
+                if protocol == process['protocol']:
+                    result['redistribute_filters'].setdefault((protocol, family, source), 'distribute-list 필터')
+    for process in result['processes']:
         if process['protocol'] == 'isis' and process['ipv6_af']:
             for interface in result['interfaces']:
                 if 'isis' in interface['protocols'] and interface['ipv6']:
                     interface['ipv6_protocols'].add('isis')
     return result
+
+
+def _selective(tokens):
+    """Why a redistribute statement may pass only part of the source routes, else None."""
+    if 'route-map' in tokens:
+        index = tokens.index('route-map')
+        return 'route-map {} 조건'.format(tokens[index + 1] if index + 1 < len(tokens) else '')
+    if tokens[1] == 'isis' and 'level-1-2' not in tokens:
+        level = next((t for t in tokens if t in ('level-1', 'level-2')), None)
+        return 'IS-IS {} 경로만 재분배'.format(level) if level else 'IS-IS 수준 미지정(기본 수준만 재분배될 수 있음)'
+    if tokens[1] == 'ospf' and 'match' in tokens:
+        return 'OSPF match 조건'
+    return None
 
 
 def _vlan_list(text):
@@ -348,11 +378,17 @@ def derive(project, parsed, linked):
                     '연결된 상대 장비의 IS-IS 활성 인터페이스')
                 break
             for protocol, command in (('ospf', 'show ipv6 ospf neighbor'), ('eigrp', 'show ipv6 eigrp neighbors')):
-                if any(True for _ in shared(nid, peer, protocol, 6)):
-                    add(nid, 'ipv6', {'kind': 'ipv6_neighbor', 'command': command, 'peer': nodes[peer].get('name'),
-                                      'router_id': next((p['router_id'] for p in other['processes'] if p['family'] == 6 and
-                                                         p['protocol'] == protocol and p['router_id']), None)},
-                        '연결된 상대 장비의 같은 IPv6 라우팅 프로토콜 인터페이스')
+                pair = next(shared(nid, peer, protocol, 6), None)
+                if pair:
+                    # OSPFv3 lists the neighbor router-id; IPv6 EIGRP lists the peer's
+                    # link-local address on the local interface (no router-id column).
+                    router_id = next((p['router_id'] for p in other['processes'] if p['family'] == 6 and
+                                      p['protocol'] == protocol and p['router_id']), None) if protocol == 'ospf' else None
+                    rule = {'kind': 'ipv6_neighbor', 'command': command, 'peer': nodes[peer].get('name'),
+                            'router_id': router_id, 'interface': pair[0]['name']}
+                    if pair[1].get('link_local'):
+                        rule['peer_address'] = pair[1]['link_local']
+                    add(nid, 'ipv6', rule, '연결된 상대 장비의 같은 IPv6 라우팅 프로토콜 인터페이스(같은 링크의 이웃 행)')
         for process in cfg['bgp']:
             for neighbor in process['neighbors'][:32]:
                 add(nid, 'bgp', {'kind': 'bgp_peer', 'command': 'show ip bgp summary', 'address': neighbor['address']},
@@ -406,10 +442,14 @@ def derive(project, parsed, linked):
         for (b, q) in vertices:
             if a != b and p == q and linked(a, b) and any(True for _ in shared(a, b, p)):
                 edges[(a, p)].add((b, p))
+    filtered = {}
     for nid, cfg in parsed.items():
         for protocol, family, source in cfg['redistribute']:
             if family == 4 and (nid, protocol) in vertices and (nid, source) in vertices:
                 edges[(nid, source)].add((nid, protocol))      # source routes flow into protocol
+                if (protocol, family, source) in cfg['redistribute_filters']:
+                    filtered[((nid, source), (nid, protocol))] = '{} {}: {}'.format(
+                        nodes[nid].get('name'), protocol, cfg['redistribute_filters'][(protocol, family, source)])
     origins = {}
     for (nid, protocol), interfaces in vertices.items():
         items = [(i, ipaddress.IPv4Interface(i['address'])) for i in interfaces if i.get('address')]
@@ -418,9 +458,11 @@ def derive(project, parsed, linked):
                       if i.get('address') and not i['shutdown']]
         origins[(nid, protocol)] = items
 
-    def reaching(target):
+    def reaching(target, strict=False, graph=None, skip=None):
+        graph = edges if graph is None else graph
+        skip = filtered if skip is None else skip
         seen, stack = {target}, [target]
-        reverse = {v: {u for u in edges if v in edges[u]} for v in edges}
+        reverse = {v: {u for u in graph if v in graph[u] and not (strict and (u, v) in skip)} for v in graph}
         while stack:
             v = stack.pop()
             for u in reverse.get(v, ()):
@@ -428,29 +470,53 @@ def derive(project, parsed, linked):
                     seen.add(u)
                     stack.append(u)
         return seen
+
+    def why(sources, skip):
+        reasons = sorted({r for (u, v), r in skip.items() if u in sources and v in sources})
+        return '; '.join(reasons[:4]) or '선별 재분배'
+
+    def return_path(nid, origin, graph, skip):
+        """Reason when the origin reaches nid only through selective redistribution."""
+        mine = [v for v in graph if v[0] == nid]
+        broad, strict = set(), set()
+        for vertex in [v for v in graph if v[0] == origin]:
+            broad |= reaching(vertex, False, graph, skip)
+            strict |= reaching(vertex, True, graph, skip)
+        if any(v in broad for v in mine) and not any(v in strict for v in mine):
+            return '반환 경로 ' + why(broad, skip)
+        return None
+    conditional = {}
     expected = {}
     for nid, cfg in parsed.items():
         if cfg['platform'] not in ('ios', 'asa'):
             continue
         own = [ipaddress.IPv4Interface(i['address']).network for i in cfg['interfaces'] if i.get('address') and not i['shutdown']]
-        found = {}
+        found, strict_found, broad = {}, set(), set()
         for vertex in [v for v in vertices if v[0] == nid]:
-            for source in reaching(vertex):
+            broad |= reaching(vertex)
+            strict = reaching(vertex, True)
+            for source in sorted(reaching(vertex)):
                 if source[0] == nid:
                     continue
                 for interface, value in origins.get(source, []):
                     if any(value.ip in network for network in own):
                         continue
                     found.setdefault(str(value.ip), (source[0], interface['name'], str(value.network)))
+                    if source in strict:
+                        strict_found.add(str(value.ip))
         expected[nid] = found
+        conditional[nid] = {address: why(broad, filtered) for address in found if address not in strict_found}
         commands = _commands(cfg['platform'])
         networks = {}
         for address, item in sorted(found.items()):
             networks.setdefault(item[2], (address, item))   # one route check per remote network
         for network, (address, (origin, name, _)) in sorted(networks.items())[:128]:
-            add(nid, 'routing', {'kind': 'route_covered', 'command': commands['route'], 'address': address,
-                                 'network': network, 'origin': '{} {}'.format(nodes[origin].get('name'), name)},
-                '같은 라우팅 도메인 또는 재분배로 연결된 도메인의 원격 대역에 대한 경로')
+            rule = {'kind': 'route_covered', 'command': commands['route'], 'address': address,
+                    'network': network, 'origin': '{} {}'.format(nodes[origin].get('name'), name),
+                    'origin_node': origin, 'origin_interface': name}
+            if address in conditional[nid]:
+                rule['conditional'] = conditional[nid][address]
+            add(nid, 'routing', rule, '같은 라우팅 도메인 또는 재분배로 연결된 도메인의 원격 대역에 대한 경로')
         # Tunnel destinations must be reachable through the underlay.
         for interface in cfg['interfaces']:
             destination = interface.get('tunnel_destination')
@@ -472,25 +538,25 @@ def derive(project, parsed, linked):
         for (b, q) in v6:
             if a != b and p == q and linked(a, b) and any(True for _ in shared(a, b, p, 6)):
                 edges6[(a, p)].add((b, p))
+    filtered6 = {}
     for nid, cfg in parsed.items():
         for protocol, family, source in cfg['redistribute']:
             if family == 6 and (nid, protocol) in v6 and (nid, source) in v6:
                 edges6[(nid, source)].add((nid, protocol))
-    expected6 = {}
+                if (protocol, family, source) in cfg['redistribute_filters']:
+                    filtered6[((nid, source), (nid, protocol))] = '{} IPv6 {}: {}'.format(
+                        nodes[nid].get('name'), protocol, cfg['redistribute_filters'][(protocol, family, source)])
+    expected6, conditional6 = {}, {}
     for nid, cfg in parsed.items():
         if cfg['platform'] != 'ios' or not any(v[0] == nid for v in v6):
             continue
         own = [ipaddress.IPv6Interface(x).network for i in cfg['interfaces'] for x in i['ipv6']]
-        reverse = {v: {u for u in edges6 if v in edges6[u]} for v in edges6}
-        found = {}
+        found, strict_found, broad = {}, set(), set()
         for vertex in [v for v in v6 if v[0] == nid]:
-            seen, stack = {vertex}, [vertex]
-            while stack:
-                for u in reverse.get(stack.pop(), ()):
-                    if u not in seen:
-                        seen.add(u)
-                        stack.append(u)
-            for source in seen:
+            seen = reaching(vertex, False, edges6, filtered6)
+            strict = reaching(vertex, True, edges6, filtered6)
+            broad |= seen
+            for source in sorted(seen):
                 if source[0] == nid:
                     continue
                 redistributed_connected = any(p == source[1] and f == 6 and s == 'connected' for p, f, s in parsed[source[0]]['redistribute'])
@@ -500,11 +566,16 @@ def derive(project, parsed, linked):
                         value = ipaddress.IPv6Interface(value)
                         if not any(value.ip in network for network in own):
                             found.setdefault(str(value.network), (str(value.ip), source[0], interface['name']))
+                            if source in strict:
+                                strict_found.add(str(value.network))
         expected6[nid] = found
+        conditional6[nid] = {found[n][0]: why(broad, filtered6) for n in found if n not in strict_found}
         for network, (address, origin, name) in sorted(found.items())[:128]:
-            add(nid, 'ipv6', {'kind': 'route6_covered', 'command': 'show ipv6 route', 'address': address, 'network': network,
-                              'origin': '{} {}'.format(nodes[origin].get('name'), name)},
-                '같은 IPv6 라우팅 도메인 또는 재분배로 연결된 도메인의 원격 IPv6 대역에 대한 경로')
+            rule = {'kind': 'route6_covered', 'command': 'show ipv6 route', 'address': address, 'network': network,
+                    'origin': '{} {}'.format(nodes[origin].get('name'), name), 'origin_node': origin, 'origin_interface': name}
+            if address in conditional6[nid]:
+                rule['conditional'] = conditional6[nid][address]
+            add(nid, 'ipv6', rule, '같은 IPv6 라우팅 도메인 또는 재분배로 연결된 도메인의 원격 IPv6 대역에 대한 경로')
 
     # Reachability (ping) plans: one representative address per remote router.
     for nid in sorted(set(expected) | set(expected6)):
@@ -532,12 +603,28 @@ def derive(project, parsed, linked):
                 per6[origin] = (address, name)
         targets += [(address, origin, name) for origin, (address, name) in per6.items()]
         seen = set()
+        from . import icmp_policy
         for address, origin, name in targets:
+            if parsed[origin]['platform']=='asa':
+                nearby=icmp_policy.near_address(nid,origin,parsed,linked)
+                if nearby is None:continue
+                address,name=nearby
             if address in seen or len(pings[nid]) >= MAX_PING_TARGETS:
                 continue
             seen.add(address)
-            pings[nid].append({'kind': 'ping', 'target': address, 'min_percent': PING_MIN_PERCENT,
-                               'destination': '{} {}'.format(nodes[origin].get('name'), name), 'policy': policy})
+            context=icmp_policy.context(nid,origin,parsed,nodes,linked) if ':' not in address else {'policy':policy}
+            flow=icmp_policy.trace_flow(nid,origin,address,parsed,nodes,linked)
+            pinned=nodes[nid].get('ping_sources',{}).get(address)
+            rule={'kind': 'ping', 'target': address, 'min_percent': PING_MIN_PERCENT,
+                  'destination': '{} {}'.format(nodes[origin].get('name'), name), 'policy': context['policy'], 'policy_context':context, 'diagnostic_flow':flow, **({'source':pinned} if flow and pinned==flow['source'] else {}),
+                  'origin_node': origin, 'origin_interface': name}
+            if ':' in address:
+                reason=conditional6.get(nid,{}).get(address) or return_path(nid,origin,edges6,filtered6)
+            else:
+                reason=conditional.get(nid,{}).get(address) or return_path(nid,origin,edges,filtered)
+            if reason:
+                rule['conditional']=reason
+            pings[nid].append(rule)
     for nid, node in nodes.items():
         vpc = node.get('vpcs_config') or {}
         if node.get('platform') != 'vpcs' or not vpc.get('gateway'):
@@ -547,15 +634,16 @@ def derive(project, parsed, linked):
         gateway = next((g for g, cfg in parsed.items() for i in cfg['interfaces']
                         if i.get('address') and str(ipaddress.IPv4Interface(i['address']).ip) == vpc['gateway']), None)
         for rule in pings.get(gateway, [])[:8]:
-            pings[nid].append({**rule, 'policy': policy})
+            pings[nid].append({**{k:v for k,v in rule.items() if k not in ('source','diagnostic_flow','conditional')}, 'policy': policy})
     return rules, pings
 
 
 # ---------------------------------------------------------------- evaluation
 
 def latest(evidence, command):
-    items = [x for x in evidence if x['command'] == command and x['status'] == 'collected' and not x.get('cli_error')]
-    return items[-1] if items else None
+    items = [x for x in evidence if x['command'] == command]
+    item=items[-1] if items else None
+    return item if item and item.get('status')=='collected' and not item.get('cli_error') else None
 
 
 def route_rows(text):
@@ -580,6 +668,97 @@ def route_rows(text):
         except ValueError:
             continue
     return routes
+
+
+def redistribution_entries(block):
+    """Source entries of one 'show ip/ipv6 protocols' process block, all output layouts."""
+    entries, lines = [], block.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if re.match(r'Redistributing:', stripped):
+            # One line, or a list continued on following lines after a trailing comma.
+            text, j = stripped.split(':', 1)[1], index
+            while text.rstrip().endswith(',') and j + 1 < len(lines):
+                j += 1
+                text += ' ' + lines[j].strip()
+            entries += [x.strip() for x in text.split(',') if x.strip()]
+        elif re.match(r'Redistributing External Routes from', stripped) or stripped == 'Redistribution:':
+            for following in lines[index + 1:]:
+                if not following.strip():
+                    break
+                if len(following) - len(following.lstrip()) <= indent:
+                    break
+                item = following.strip().rstrip(',')
+                if item.lower() == 'none':
+                    continue
+                item = re.sub(r'^Redistributing protocol\s+', '', item)
+                entries.append(item)
+    return entries
+
+
+def ipv6_neighbor_rows(text):
+    """Rows of 'show ipv6 eigrp neighbors' and 'show ipv6 ospf neighbor' with their local interface."""
+    rows, lines = [], text.splitlines()
+    for index, line in enumerate(lines):
+        m = re.match(r'^\s*\d+\s+(?:Link-local address:|([0-9A-Fa-f]*:[0-9A-Fa-f:]+))\s+(\S+)\s+\d+\s', line)
+        if m:
+            address = m[1]
+            if not address:
+                following = next((x.strip() for x in lines[index + 1:index + 3] if x.strip()), '')
+                address = following.split()[0] if re.match(r'[0-9A-Fa-f]*:[0-9A-Fa-f:]+', following) else None
+            rows.append({'interface': m[2], 'address': address})
+            continue
+        m = re.match(r'^\s*(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\S+)\s+\S+\s+\S+\s+(\S+)\s*$', line)
+        if m:
+            rows.append({'router_id': m[1], 'state': m[2], 'interface': m[3]})
+    return rows
+
+
+def _same6(a, b):
+    try:
+        return ipaddress.IPv6Address(a) == ipaddress.IPv6Address(b)
+    except ValueError:
+        return False
+
+
+def interface_states(evidence):
+    """{(family, interface_key): (status, protocol)} from the latest interface summaries."""
+    states = {}
+    for command in ('show ip interface brief', 'show interface ip brief'):
+        item = latest(evidence, command)
+        if not item:
+            continue
+        for line in item['text'].splitlines():
+            fields = line.split()
+            if len(fields) >= 6 and fields[2] in ('YES', 'NO'):
+                status = 'administratively down' if 'administratively' in fields else fields[-2]
+                states[(4, key(fields[0]))] = (status, fields[-1])
+    item = latest(evidence, 'show ipv6 interface brief')
+    if item:
+        for line in item['text'].splitlines():
+            m = re.match(r'^(\S+)\s+\[([^/\]]+)/([^\]]+)\]', line)
+            if m:
+                states[(6, key(m[1]))] = (m[2].strip(), m[3].strip())
+    return states
+
+
+def qualify(result, rule, states):
+    """A failed derived expectation whose premise is not met becomes inconclusive; the record is kept."""
+    if result.get('status') != 'failed':
+        return result
+    origin, name = rule.get('origin_node'), rule.get('origin_interface')
+    if origin and name:
+        family = 6 if rule['kind'] == 'route6_covered' or ':' in str(rule.get('target', '')) else 4
+        observed = states.get(origin, {})
+        state = observed.get((family, key(name))) or observed.get((4, key(name)))
+        if state and state != ('up', 'up'):
+            return {**result, 'status': 'inconclusive', 'classification': 'origin_inactive',
+                    'reason': '출발 장비 인터페이스 {}가 수집 시 {} 상태여서 이 대역이 광고되지 않을 수 있습니다. 기대 범위에서 단정하지 않으며 경로·응답 기록은 그대로 보존합니다.'.format(name, ' / '.join(state))}
+    if rule.get('conditional'):
+        return {**result, 'status': 'inconclusive', 'classification': 'selective_redistribution',
+                'reason': '선별 재분배 조건({})에 따라 제외될 수 있는 대역이어서 설정만으로 기대하지 않습니다. 경로 없음·응답 없음 기록은 그대로 보존합니다.'.format(rule['conditional'])}
+    return result
 
 
 def _row(text, interface):
@@ -660,6 +839,18 @@ def evaluate(rule, evidence, node=None):
         if rule.get('router_id'):
             hit = re.search(r'(?m)^\s*' + re.escape(rule['router_id']) + r'\s+\S+\s+(\S+)', text)
             return done(bool(hit and hit[1].upper().startswith('FULL')), hit[1] if hit else '이웃 없음')
+        if rule.get('interface'):
+            rows = ipv6_neighbor_rows(text)
+            local = [r for r in rows if key(r['interface']) == key(rule['interface'])]
+            if 'ospf' in command:
+                full = [r for r in local if (r.get('state') or '').upper().startswith('FULL')]
+                return done(bool(full), '{} {}'.format(full[0]['interface'], full[0]['state']) if full else
+                            ('{} {}'.format(local[0]['interface'], local[0].get('state')) if local else '해당 인터페이스 이웃 없음'))
+            wanted = rule.get('peer_address')
+            match = [r for r in local if not wanted or (r.get('address') and _same6(r['address'], wanted))]
+            if match:
+                return done(True, '{} {}'.format(match[0]['interface'], match[0].get('address') or '링크로컬 이웃'))
+            return done(False, '{} 이웃 {}'.format(local[0]['interface'], local[0].get('address')) if local else '해당 인터페이스 이웃 없음')
         return done(bool(re.search(r'(?im)^\s*\d+\s+(?:Link-local address:|FE80::)', text) or re.search(r'FE80::', text, re.I)),
                     'IPv6 이웃 행' if 'fe80' in text.lower() else '이웃 없음')
     if kind == 'bgp_peer':
@@ -668,12 +859,13 @@ def evaluate(rule, evidence, node=None):
             return done(False, 'neighbor 없음')
         return done(row[-1].isdigit(), 'State/PfxRcd ' + row[-1])
     if kind == 'redistribution':
-        blocks = re.split(r'(?m)^(?=Routing Protocol is )', text)
-        block = next((b for b in blocks if re.match(r'Routing Protocol is "' + rule['into'], b)), '')
-        if not block:
+        blocks = [b for b in re.split(r'(?m)^(?=(?:IPv6 )?Routing Protocol is )', text)
+                  if re.match(r'(?:IPv6 )?Routing Protocol is "' + re.escape(rule['into']) + r'\b', b)]
+        if not blocks:
             return done(False, rule['into'] + ' 프로세스 출력 없음')
-        hit = re.search(r'Redistributing[^\n]*(?:\n\s+[^\n]*)?', block)
-        return done(bool(hit and rule['source'] in hit[0].lower()), ' '.join(hit[0].split()) if hit else '재분배 항목 없음')
+        entries = [entry for block in blocks for entry in redistribution_entries(block)]
+        sources = {re.split(r'[\s,]+', entry)[0].lower() for entry in entries if entry.strip()}
+        return done(rule['source'].lower() in sources, ', '.join(entries[:8]) if entries else '재분배 항목 없음')
     if kind == 'ssh_enabled':
         if command == 'show ssh':
             return done(bool(re.search(r'\d+\.\d+\.\d+\.\d+', text)), '허용 호스트 목록' if re.search(r'\d+\.\d+\.\d+\.\d+', text) else '허용 호스트 없음')
@@ -701,7 +893,8 @@ def evaluate(rule, evidence, node=None):
         hit = re.search(r'VTP Operating Mode\s*:\s*(\S+)', text)
         return done(bool(hit and hit[1].lower() == rule['mode']), hit[1] if hit else '모드 없음')
     if kind == 'stp_root':
-        block = re.search(r'(?ims)^VLAN0*' + str(rule['vlan']) + r'\b(.*?)(?=^VLAN\d|\Z)', text)
+        # Catalyst lists "VLAN0001" at column 0; EtherSwitch modules indent " VLAN1 is executing".
+        block = re.search(r'(?ims)^[ \t]*VLAN0*' + str(rule['vlan']) + r'\b(.*?)(?=^[ \t]*VLAN\d|\Z)', text)
         if not block:
             block = re.search(r'(?is)(Spanning tree \d+ is executing.*)', text) if rule['vlan'] == 1 else None
         if not block:
@@ -728,15 +921,30 @@ def ping_command(rule, platform):
         return 'ping ' + target + ' -c 5'
     if ':' in target:
         return 'ping ipv6 ' + target + ' repeat 5 timeout 1'
-    return 'ping ' + target + ' repeat 5 timeout 1'
+    source=(' source '+str(ipaddress.IPv4Address(rule['source']))) if rule.get('source') else ''
+    return 'ping ' + target + source + ' repeat 5 timeout 1'
 
 
 def _ping(rule, evidence, node):
+    result=_ping_result(rule,evidence,node)
+    diagnostic=(node or {}).get('ping_diagnostics',{}).get(result.get('command'))
+    if diagnostic and result.get('status')!='passed':
+        from .asa_diagnostics import describe
+        result['reason']=(result.get('reason','')+' '+describe(diagnostic)).strip()
+        result['asa_diagnostic']=diagnostic
+        result['additional_evidence']=diagnostic.get('evidence',[])
+    return result
+
+
+def _ping_result(rule, evidence, node):
     platform = (node or {}).get('platform', 'ios')
     command = ping_command(rule, platform)
-    item = latest(evidence, command)
+    attempts=[x for x in evidence if x.get('command')==command]
+    item=attempts[-1] if attempts else None
     if not item:
         return {'status': 'inconclusive', 'reason': '도달성 확인(ping)을 실행하지 못했습니다.', 'command': command}
+    if item.get('status')!='collected' or item.get('cli_error'):
+        return {'status':'inconclusive','command':command,'evidence':item.get('file'),'reason':'마지막 ping 명령을 정상적으로 완료하지 못했습니다.'}
     text = item['text']
     m = re.search(r'Success rate is (\d+) percent', text)
     if m:
@@ -748,9 +956,12 @@ def _ping(rule, evidence, node):
         rate = min(100, replies * 20)
     else:
         return {'status': 'inconclusive', 'reason': 'ping 결과를 해석하지 못했습니다.', 'command': command, 'evidence': item['file']}
-    observed = {'success_percent': rate, 'destination': rule.get('destination')}
+    observed = {'success_percent': rate, 'destination': rule.get('destination'), 'attempts':[{'attempt':x.get('attempt',i+1),'evidence':x.get('file'),'started_at':x.get('started_at')} for i,x in enumerate(attempts)]}
     if rate >= rule.get('min_percent', PING_MIN_PERCENT):
         return {'status': 'passed', 'command': command, 'evidence': item['file'], 'observed': observed}
+    if rule.get('policy') and rule.get('policy_context',{}).get('classification')=='policy_limited':
+        return {'status':'inconclusive','classification':'policy_limited','command':command,'evidence':item['file'],'observed':observed,
+                'reason':'방화벽 설정 참고: '+rule['policy_context']['reason']+' ICMP 응답은 해당 설정과 함께 해석합니다.'}
     if rule.get('policy'):
         return {'status': 'inconclusive', 'command': command, 'evidence': item['file'], 'observed': observed,
                 'reason': '응답 없음. 이 프로젝트에는 NAT·ACL·방화벽·VPN 정책이 있어 의도한 차단인지 설정만으로 판단하지 않습니다.'}

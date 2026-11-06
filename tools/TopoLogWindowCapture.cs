@@ -48,9 +48,86 @@ public static class TopoLogWindowCapture {
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint source,uint target,bool attach);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    public static bool BringForeground(long handle) {
+        IntPtr target=new IntPtr(handle);
+        if(!IsWindow(target)) return false;
+        if(GetForegroundWindow()==target) return true;
+        IntPtr before=GetForegroundWindow();
+        SetForegroundWindow(target);
+        if(GetForegroundWindow()==target) return true;
+        // Do not override a different window chosen during the first attempt.
+        if(GetForegroundWindow()!=before) return false;
+        uint pid;
+        uint foregroundThread=GetWindowThreadProcessId(before,out pid);
+        uint ownThread=GetCurrentThreadId();
+        bool attached=foregroundThread!=0 && ownThread!=foregroundThread && AttachThreadInput(ownThread,foregroundThread,true);
+        try {
+            if(GetForegroundWindow()!=before) return false;
+            BringWindowToTop(target);
+            SetForegroundWindow(target);
+        } finally {
+            if(attached) AttachThreadInput(ownThread,foregroundThread,false);
+        }
+        return GetForegroundWindow()==target;
+    }
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
 
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hwnd);
+    public static string WindowTitle(long handle) {
+        var text=new StringBuilder(2048);GetWindowText(new IntPtr(handle),text,text.Capacity);return text.ToString();
+    }
+    public static long ForegroundHandle() { return GetForegroundWindow().ToInt64(); }
+    public static int WindowProcessId(long handle) {
+        if(handle==0) return 0;
+        uint pid;GetWindowThreadProcessId(new IntPtr(handle),out pid);return (int)pid;
+    }
+    public static string ProcessNameOf(int pid) {
+        if(pid<=0) return "";
+        try { return Process.GetProcessById(pid).ProcessName; } catch(ArgumentException) { return ""; }
+        catch(InvalidOperationException) { return ""; }
+    }
+    // Visible top-level windows of one process (diagnostics for a stalled project open).
+    public static TopoLogDialogInfo[] ListProcessWindows(int processId) {
+        var windows=new List<TopoLogDialogInfo>();
+        EnumWindows(delegate(IntPtr hwnd,IntPtr unused) {
+            if(!IsWindowVisible(hwnd)) return true;
+            uint pid;GetWindowThreadProcessId(hwnd,out pid);
+            if((int)pid!=processId) return true;
+            var text=new StringBuilder(2048);GetWindowText(hwnd,text,text.Capacity);
+            var className=new StringBuilder(256);GetClassName(hwnd,className,className.Capacity);
+            windows.Add(new TopoLogDialogInfo {Handle=hwnd.ToInt64(),Title=text.ToString(),ProcessId=(int)pid,OwnerHandle=GetWindow(hwnd,4).ToInt64(),ClassName=className.ToString()});
+            return true;
+        },IntPtr.Zero);
+        return windows.ToArray();
+    }
+    // Put back the window the user had in front before TopoLog raised GNS3.
+    // Only when GNS3 (the window TopoLog raised) is still in front; a window the
+    // user switched to meanwhile is left alone. Minimizes GNS3 again only if
+    // TopoLog restored it from the minimized state. Windows may refuse; that is reported.
+    public static string RestoreForeground(long previous,int gns3ProcessId,long gns3Window,bool minimizeGns3) {
+        int previousPid=WindowProcessId(previous);
+        IntPtr current=GetForegroundWindow();
+        int currentPid=WindowProcessId(current.ToInt64());
+        string currentName=ProcessNameOf(currentPid).ToLowerInvariant();
+        bool gns3InFront=current==IntPtr.Zero || currentPid==gns3ProcessId ||
+            currentName=="vmware" || currentName=="vmplayer" || currentName=="vmware-vmx" ||
+            currentName=="virtualbox" || currentName=="virtualboxvm";
+        if(minimizeGns3 && gns3Window!=0 && IsWindow(new IntPtr(gns3Window)) && !IsIconic(new IntPtr(gns3Window)) && (gns3InFront || current.ToInt64()!=gns3Window))
+            ShowWindowAsync(new IntPtr(gns3Window),7);
+        if(previous==0) return "no_previous";
+        if(previousPid==gns3ProcessId) return "previous_was_gns3";
+        if(!IsWindow(new IntPtr(previous))) return "previous_closed";
+        if(current.ToInt64()==previous) return "unchanged";
+        if(!gns3InFront) return "user_switched";
+        if(IsIconic(new IntPtr(previous))) return "previous_minimized";
+        BringForeground(previous);
+        Thread.Sleep(150);
+        return GetForegroundWindow().ToInt64()==previous ? "restored" : "os_refused";
+    }
     public static bool TitleMatches(string title, string projectName) {
         return title != null && String.Equals(title.Trim(), projectName + " - GNS3", StringComparison.OrdinalIgnoreCase);
     }
@@ -159,6 +236,22 @@ public static class TopoLogWindowCapture {
         },IntPtr.Zero);
         return rows.ToArray();
     }
+    public static string ReadDialogFilename(long edit) {
+        IntPtr result;var value=new StringBuilder(32768);
+        if(ReadTextTimeout(new IntPtr(edit),13,new IntPtr(value.Capacity),value,2,1500,out result)==IntPtr.Zero)
+            throw new InvalidOperationException("Cannot read the filename edit field.");
+        return value.ToString();
+    }
+    [DllImport("user32.dll",EntryPoint="SendMessageTimeoutW",SetLastError=true)]
+    private static extern IntPtr SendNumberTimeout(IntPtr hwnd,uint message,IntPtr wParam,IntPtr lParam,uint flags,uint timeout,out IntPtr result);
+    public static void ReplaceDialogFilename(long edit,string filename) {
+        IntPtr result;IntPtr hwnd=new IntPtr(edit);
+        if(SendNumberTimeout(hwnd,177,IntPtr.Zero,new IntPtr(-1),2,650,out result)==IntPtr.Zero)
+            throw new InvalidOperationException("Cannot select filename text.");
+        // EM_REPLACESEL returns zero on success: only the API timeout result is checked.
+        if(SendTextTimeout(hwnd,194,new IntPtr(1),filename,2,650,out result)==IntPtr.Zero)
+            throw new InvalidOperationException("Cannot replace filename text.");
+    }
     public static void SetDialogFilename(long edit,string filename) {
         IntPtr result;
         if(SendTextTimeout(new IntPtr(edit),12,IntPtr.Zero,filename,2,2500,out result)==IntPtr.Zero || result==IntPtr.Zero)
@@ -208,6 +301,39 @@ public static class TopoLogWindowCapture {
         }
         return colors.Count>8 && max-min>20;
     }
+    [StructLayout(LayoutKind.Sequential)] private struct Placement { public int Length, Flags, ShowCmd; public Point MinPosition, MaxPosition; public Rect Normal; }
+    [DllImport("user32.dll")] private static extern bool GetWindowPlacement(IntPtr hwnd, ref Placement placement);
+    [DllImport("user32.dll")] private static extern bool SetWindowPlacement(IntPtr hwnd, ref Placement placement);
+    [DllImport("user32.dll")] private static extern bool IsZoomed(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    // Saved as "showCmd,left,top,right,bottom" so the caller can put the window back exactly.
+    public static string SavePlacement(long handle) {
+        var p=new Placement(); p.Length=Marshal.SizeOf(typeof(Placement));
+        if(!GetWindowPlacement(new IntPtr(handle),ref p)) return null;
+        return string.Join(",",new[]{p.ShowCmd,p.Normal.Left,p.Normal.Top,p.Normal.Right,p.Normal.Bottom});
+    }
+    public static bool RestorePlacement(long handle,string saved) {
+        if(string.IsNullOrEmpty(saved) || !IsWindow(new IntPtr(handle))) return false;
+        var parts=saved.Split(','); if(parts.Length!=5) return false;
+        var p=new Placement(); p.Length=Marshal.SizeOf(typeof(Placement));
+        if(!GetWindowPlacement(new IntPtr(handle),ref p)) return false;
+        p.ShowCmd=int.Parse(parts[0]); p.Normal.Left=int.Parse(parts[1]); p.Normal.Top=int.Parse(parts[2]);
+        p.Normal.Right=int.Parse(parts[3]); p.Normal.Bottom=int.Parse(parts[4]);
+        if(p.ShowCmd==2) p.ShowCmd=6;      // minimized: keep it minimized without activating
+        return SetWindowPlacement(new IntPtr(handle),ref p);
+    }
+    public static int WindowWidth(long handle) { Rect r; return GetWindowRect(new IntPtr(handle),out r) ? r.Right-r.Left : 0; }
+    // GNS3 hides whole toolbars (the Screenshot button among them) in a narrow window.
+    // Maximize only when the window is narrower than minWidth; the caller restores the placement.
+    public static bool Widen(long handle,int minWidth) {
+        IntPtr hwnd=new IntPtr(handle);
+        if(!IsWindow(hwnd) || IsZoomed(hwnd) || WindowWidth(handle)>=minWidth) return false;
+        ShowWindowAsync(hwnd,3);
+        var clock=Stopwatch.StartNew();
+        while(!IsZoomed(hwnd) && clock.ElapsedMilliseconds<2000) Thread.Sleep(50);
+        Thread.Sleep(400);
+        return IsZoomed(hwnd);
+    }
     public static bool PrepareWindow(long handle, bool foreground) {
         IntPtr hwnd=new IntPtr(handle);
         bool restored=false;
@@ -219,7 +345,7 @@ public static class TopoLogWindowCapture {
             restored=true;
             Thread.Sleep(700);
         }
-        if(foreground) SetForegroundWindow(hwnd);
+        if(foreground) BringForeground(handle);
         return restored;
     }
     public static int[] Capture(long handle, string destination, string method) {

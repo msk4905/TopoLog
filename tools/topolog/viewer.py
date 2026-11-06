@@ -12,7 +12,8 @@ import html
 def report_view(path):
     """Upgrade old presentation and integrity metadata; raw evidence is unchanged."""
     path = Path(path).resolve(strict=True)
-    summary = path.parent / 'summary.json'
+    from .resultdir import summary_file
+    summary = summary_file(path.parent)
     with path.open(encoding='utf-8', errors='replace') as stream:
         legacy = '<h1>TopoLog</h1><pre>' in stream.read(4096)
     if not legacy or not summary.is_file():
@@ -82,7 +83,8 @@ def open_report(path):
 
 def latest_report(output):
     try:
-        candidates = [p for p in Path(output).glob('batch_*') if p.is_dir() and (p / 'index.html').is_file()]
+        from .naming import result_folders
+        candidates = [p for p in result_folders(output) if p.is_dir() and (p / 'index.html').is_file()]
         return max(candidates, key=lambda p:(p/'index.html').stat().st_mtime) if candidates else None
     except OSError:
         return None

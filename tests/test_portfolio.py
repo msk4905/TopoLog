@@ -49,8 +49,8 @@ class PortfolioTests(unittest.TestCase):
             (out / 'p1' / 'topology.json').write_text(json.dumps({'drawings': [{'svg': '<svg><text font-size="20.0">OSPF 실습</text></svg>'}],
                                                                  'links': [{'link_type': 'serial'}]}), encoding='utf-8')
             names = portfolio.write(report(), out)
-            self.assertEqual(names, ['report.docx', 'report-document.md'])
-            with zipfile.ZipFile(out / 'report.docx') as archive:
+            self.assertEqual(names, ['report(2026-11-04).docx', 'report-document(2026-11-04).md'])
+            with zipfile.ZipFile(out / 'report(2026-11-04).docx') as archive:
                 self.assertIsNone(archive.testzip())
                 for part in ('[Content_Types].xml', 'word/document.xml', 'word/styles.xml', 'word/header1.xml', 'word/media/image1.png'):
                     self.assertIn(part, archive.namelist())
@@ -59,26 +59,28 @@ class PortfolioTests(unittest.TestCase):
                 for part in archive.namelist():
                     if part.endswith(('.xml', '.rels')):
                         ET.fromstring(archive.read(part))
-            text = (out / 'report-document.md').read_text(encoding='utf-8')
+            text = (out / 'report-document(2026-11-04).md').read_text(encoding='utf-8')
             for heading in ('1. 프로젝트 개요', '2. 핵심 역량', '3. 대표 프로젝트 한눈에 보기', '구성과 목적', '주요 설정', '동작 원리',
-                            '검증 결과', '4. 전체 실습 목록', '5. 증빙 자료'):
+                            '수집 출력', '4. 전체 실습 목록', '5. 증빙 자료'):
                 self.assertIn(heading, text)
                 self.assertIn(heading, document)
             self.assertIn('OSPF 실습', text)                  # topic from the GNS3 drawing title
             self.assertIn('GNS3 자체 Screenshot', text)
-            self.assertIn('미충족', text)                     # failed checks are reported, not hidden
+            self.assertNotIn('미충족', text)
+            self.assertIn('경로 없음', text)                    # observations remain without a grade
             self.assertIn(' ip ospf cost 10', text)
             for secret in ('lab-secret', '$1$abc'):
                 self.assertNotIn(secret, text)
                 self.assertNotIn(secret, document)
-            self.assertIn('[직접 입력]', text)
+            self.assertNotIn('[직접 입력]', text)                # no fill-in placeholders in the documents
+            self.assertNotIn('[직접 입력]', document)
 
     def test_missing_native_image_is_stated(self):
         with tempfile.TemporaryDirectory() as temp:
             data = report()
             data['projects'][0]['topology_images'] = {'native': {'status': 'unavailable'}}
             portfolio.write(data, Path(temp))
-            text = (Path(temp) / 'report-document.md').read_text(encoding='utf-8')
+            text = (Path(temp) / 'report-document(2026-11-04).md').read_text(encoding='utf-8')
             self.assertIn('GNS3 자체 Screenshot이 없습니다', text)
             self.assertNotIn('![](', text)
 
