@@ -927,12 +927,31 @@ def ping_command(rule, platform):
 
 def _ping(rule, evidence, node):
     result=_ping_result(rule,evidence,node)
+    attempts=(result.get('observed') or {}).get('attempts') or []
+    if result.get('status')=='passed' and len(attempts)>1:
+        # Earlier unanswered attempts stay in the evidence; say plainly that the answer came late.
+        result['reason']='{}번째 시도에서 응답 · 앞선 {}번은 응답 없음(장비 부팅·경로 준비 대기, 모든 시도 원문 보존)'.format(len(attempts),len(attempts)-1)
+        result['delayed']=True
+    followup=(node or {}).get('ping_followup',{}).get(result.get('command'))
+    if followup and result.get('status')!='passed':
+        notes,extra=[],[]
+        reverse=followup.get('reverse')
+        if reverse:
+            notes.append('반대 방향 ping({}→{}): {}'.format(reverse.get('name',''),reverse.get('target',''),'응답 있음' if reverse.get('status')=='answered' else '응답 없음'))
+            if reverse.get('file'):extra.append({'node_id':reverse['node_id'],'file':reverse['file'],'label':'반대 방향 ping 원문'})
+        route=followup.get('route')
+        if route:
+            notes.append('출발 장비 경로 조회: '+(route['observed'] if route.get('observed') else '해당 목적지 경로 없음'))
+            if route.get('file'):extra.append({'node_id':(node or {}).get('node_id'),'file':route['file'],'label':'경로 조회 원문'})
+        if notes:
+            result['reason']=(result.get('reason','')+' · 추가 확인: '+' · '.join(notes)).strip(' ·')
+            result['additional_evidence']=extra
     diagnostic=(node or {}).get('ping_diagnostics',{}).get(result.get('command'))
     if diagnostic and result.get('status')!='passed':
         from .asa_diagnostics import describe
         result['reason']=(result.get('reason','')+' '+describe(diagnostic)).strip()
         result['asa_diagnostic']=diagnostic
-        result['additional_evidence']=diagnostic.get('evidence',[])
+        result['additional_evidence']=result.get('additional_evidence',[])+diagnostic.get('evidence',[])
     return result
 
 

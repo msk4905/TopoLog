@@ -47,7 +47,7 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(names - word, TOP)
         data = records(self.output)
         self.assertEqual(data, self.output / RECORDS)
-        for name in ('summary.json', 'manifest.json', 'criteria-used.json', 'findings.md', P):
+        for name in ('summary.json', 'manifest.json', 'criteria-used.json', 'findings.md', 'routing'):
             self.assertTrue((data / name).exists(), name)
         self.assertTrue(next(data.glob('report(*).md')).is_file())
         self.assertTrue(next(data.glob('report-document(*).md')).is_file())
@@ -56,11 +56,11 @@ class LayoutTests(unittest.TestCase):
     def test_every_report_link_and_picture_resolves(self):
         html = (self.output / 'index.html').read_text(encoding='utf-8')
         found = links(html)
-        self.assertTrue(any(f.startswith(RECORDS + '/' + P + '/') for f in found))
+        self.assertTrue(any(f.startswith(RECORDS + '/routing/') for f in found))
         self.assertTrue(any(f.startswith('토폴로지_사진/') for f in found))
         self.assertIn('토폴로지_사진/', found)                               # folder links open the folders
         self.assertIn(RECORDS + '/', found)
-        self.assertIn(RECORDS + '/' + P + '/', found)
+        self.assertIn(RECORDS + '/routing/', found)
         for relative in found:
             target = self.output / relative
             self.assertTrue(target.is_dir() if relative.endswith('/') else target.is_file(), relative)
@@ -87,7 +87,7 @@ class LayoutTests(unittest.TestCase):
         again = self.root / 'again'
         reassess(self.output, again)
         self.assertEqual({p.name for p in again.iterdir()} - {n for n in os.listdir(again) if n.endswith('.docx')}, TOP)
-        self.assertTrue((again / RECORDS / P / 'topology.json').is_file())
+        self.assertTrue((again / RECORDS / 'routing' / 'topology.json').is_file())
         self.assertFalse((again / RECORDS / '토폴로지_사진').exists())
         # A result written before v1.0.0 (everything at the top) still refreshes in place.
         old = self.root / 'old'

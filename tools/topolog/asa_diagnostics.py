@@ -4,6 +4,8 @@ Simulation is evidence about packet processing, never proof of intended policy.
 Only existing buffered logs are read; logging configuration is never changed.
 """
 from collections import Counter
+from .resultdir import node_dir
+from .projectcopy import api_id
 import ipaddress
 import re
 import time
@@ -65,7 +67,7 @@ def run(api,entry,folder,factory,progress,cancel,enable,password,provider,known)
         try:
             if cancel and cancel.is_set():raise InterruptedError('ASA diagnostics cancelled')
             progress('방화벽 ICMP 흐름을 확인합니다: '+asa.get('name',aid))
-            fresh=api.call('/v2/projects/'+entry['project_id']+'/nodes/'+aid)
+            fresh=api.call('/v2/projects/'+api_id(entry)+'/nodes/'+aid)
             host=fresh.get('console_host')
             if host in (None,'','0.0.0.0','::'):host=api.host
             console=factory(host,fresh['console'],ready_timeout=30,command_timeout=12,cancel=cancel,progress=progress)
@@ -80,7 +82,7 @@ def run(api,entry,folder,factory,progress,cancel,enable,password,provider,known)
                 if time.monotonic()>deadline:raise TimeoutError('ASA diagnostics time budget exceeded')
                 started=now();text=console.command(command)
                 name='{:02d}.txt'.format(len(asa['commands'])+1)
-                (folder/aid/name).write_text(text,encoding='utf-8')
+                (folder/node_dir(asa)/name).write_text(text,encoding='utf-8')
                 item={'command':command,'file':name,'text':text,'status':'collected','optional':True,
                       'phase':'asa_diagnostics','started_at':started,'finished_at':now(),'cli_error':bool(CLI_ERROR.search(text))}
                 asa['commands'].append(item);return item
@@ -116,7 +118,7 @@ def run(api,entry,folder,factory,progress,cancel,enable,password,provider,known)
                     asa.setdefault('cleanup_errors',[]).append('ASA diagnostics cleanup: '+str(exc));asa['collection']='partial'
                 finally:
                     console.cancel=previous;console.close()
-                    (folder/aid/'asa-diagnostics.rx.bin').write_bytes(bytes(console.wire))
+                    (folder/node_dir(asa)/'asa-diagnostics.rx.bin').write_bytes(bytes(console.wire))
 
 
 def describe(record):

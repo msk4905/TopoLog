@@ -46,16 +46,19 @@ def ensure_tree(root):
 
 
 def validate_report_paths(report,root):
-    from .resultdir import records
+    from .resultdir import records, project_dir, node_dir, node_dir_of
     ensure_tree(root)
     root=records(root)
     for project in report.get('projects',[]):
         if not project.get('project_id') and not project.get('nodes') and not any(i.get('file') for i in project.get('topology_images',{}).values()):continue
-        base=safe_path(root,str(project.get('project_id','')))
+        for item in [project]+project.get('nodes',[]):
+            if 'folder' in item and (not isinstance(item['folder'],str) or re.search(r'[/\\]',item['folder'])):
+                raise ValueError('Evidence folder must be a single folder name')
+        base=safe_path(root,project_dir(project))
         for image in project.get('topology_images',{}).values():
             if image.get('file'):safe_path(base,image['file'])
         for node in project.get('nodes',[]):
-            folder=safe_path(base,str(node.get('node_id','')))
+            folder=safe_path(base,node_dir(node))
             for command in node.get('commands',[]):
                 if command.get('file'):safe_path(folder,command['file'])
             startup=node.get('startup_configuration',{})
@@ -63,7 +66,7 @@ def validate_report_paths(report,root):
             for check in node.get('checks',[]):
                 if check.get('evidence'):safe_path(folder,check['evidence'])
                 for evidence in check.get('additional_evidence',[]):
-                    safe_path(safe_path(base,str(evidence.get('node_id',''))),evidence.get('file',''))
+                    safe_path(safe_path(base,node_dir_of(project,evidence.get('node_id',''))),evidence.get('file',''))
 
 
 def passive_svg(text):

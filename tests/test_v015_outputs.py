@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from topolog.resultdir import records as R  # noqa: E402
+from topolog.resultdir import evidence_dir as E  # noqa: E402
 from topolog import gallery, report_options, resources, winfocus
 from topolog.engine import Runner
 from topolog.pausing import PauseGate
@@ -54,9 +55,9 @@ class OutputTests(unittest.TestCase):
         output, report = self.run_batch()
         real = output / '토폴로지_사진' / 'GNS3_실제_사진' / 'routing.png'
         drawn = output / '토폴로지_사진' / '재구성_그림' / 'routing.svg'
-        self.assertEqual(real.read_bytes(), (R(output) / P / 'capture' / 'gns3-topology.png').read_bytes())
+        self.assertEqual(real.read_bytes(), (E(output, P) / 'capture' / 'gns3-topology.png').read_bytes())
         self.assertTrue(drawn.is_file())
-        self.assertTrue((R(output) / P / 'capture' / 'gns3-topology.png').is_file())          # evidence kept in place
+        self.assertTrue((E(output, P) / 'capture' / 'gns3-topology.png').is_file())          # evidence kept in place
         self.assertTrue((output / '토폴로지_사진' / '안내.txt').is_file())
         html = (output / 'index.html').read_text(encoding='utf-8')
         from urllib.parse import quote
@@ -117,7 +118,7 @@ class OutputTests(unittest.TestCase):
         summary = json.loads((R(copy) / 'summary.json').read_text(encoding='utf-8'))
         self.assertEqual(summary['report_options']['detail_scope'], 'all')
         self.assertEqual((copy / '토폴로지_사진' / 'GNS3_실제_사진' / 'routing.png').read_bytes(),
-                         (R(copy) / P / 'capture' / 'gns3-topology.png').read_bytes())
+                         (E(copy, P) / 'capture' / 'gns3-topology.png').read_bytes())
 
     def test_runner_pauses_only_at_safe_points_and_cancel_while_paused(self):
         gate, cancel = PauseGate(), threading.Event()

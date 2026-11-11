@@ -5,6 +5,8 @@ attempt, time and reason, and the latest sample is what later analysis reads.
 Missing routes or unstable states are never invented, waived or replaced by an
 older success. Waiting is bounded and cancellable.
 """
+from .resultdir import node_dir
+from .projectcopy import api_id
 import re
 from contextlib import closing
 from .transport import CLI_ERROR
@@ -83,7 +85,7 @@ def _session(api, entry, folder, node, commands, factory, progress, cancel, enab
     console = None
     terminal = {}
     try:
-        fresh = api.call('/v2/projects/' + entry['project_id'] + '/nodes/' + node['node_id'])
+        fresh = api.call('/v2/projects/' + api_id(entry) + '/nodes/' + node['node_id'])
         host = fresh.get('console_host')
         if host in (None, '', '0.0.0.0', '::'):
             host = api.host
@@ -106,7 +108,7 @@ def _session(api, entry, folder, node, commands, factory, progress, cancel, enab
             text = console.command(command)
             text = re.sub(r'<--- More ---> {0,14}', '', text)
             name = '{:02d}.txt'.format(len(node['commands']) + 1)
-            (folder / node['node_id'] / name).write_text(text, encoding='utf-8')
+            (folder / node_dir(node) / name).write_text(text, encoding='utf-8')
             item = {'command': command, 'file': name, 'text': text, 'status': 'collected',
                     'started_at': started, 'finished_at': now(), 'phase': 'final_routing',
                     'optional': True, 'cli_error': bool(CLI_ERROR.search(text))}
@@ -137,7 +139,7 @@ def _session(api, entry, folder, node, commands, factory, progress, cancel, enab
                 console.cancel = previous_cancel
                 console.close()
                 suffix = '' if attempt == 1 else '-{}'.format(attempt)
-                (folder / node['node_id'] / 'final-routing{}.rx.bin'.format(suffix)).write_bytes(bytes(console.wire))
+                (folder / node_dir(node) / 'final-routing{}.rx.bin'.format(suffix)).write_bytes(bytes(console.wire))
             record['terminal'] = terminal
 
 

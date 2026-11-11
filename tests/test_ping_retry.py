@@ -18,7 +18,8 @@ class PingRetryTests(unittest.TestCase):
         class Console:
             prompt='R1>'
             wire=b''
-            def __init__(self,*a,**k):self.responses=iter(responses)
+            stream=iter(responses)
+            def __init__(self,*a,**k):self.responses=Console.stream
             def connect(self):pass
             def close(self):pass
             def command(self,cmd):
@@ -45,14 +46,17 @@ class PingRetryTests(unittest.TestCase):
         self.assertEqual(wait,0)
 
     def test_still_failing_is_bounded(self):
-        node,result,wait=self.run_ping([0,0])
+        # One delayed retry, then once more after every device: route lookup and a last ping.
+        node,result,wait=self.run_ping([0,0,'% Network not in table',0])
         self.assertEqual(result['status'],'failed')
-        self.assertEqual(len(node['commands']),2)
+        self.assertEqual([c['command'].split()[0] for c in node['commands']],['ping','ping','show','ping'])
+        self.assertEqual(node['commands'][-1]['attempt'],3)
+        self.assertIn('경로 없음',result['reason'])
 
     def test_policy_failure_remains_inconclusive_after_retry(self):
-        node,result,wait=self.run_ping([0,0],True)
+        node,result,wait=self.run_ping([0,0,'% Network not in table',0],True)
         self.assertEqual(result['status'],'inconclusive')
-        self.assertEqual(len(node['commands']),2)
+        self.assertEqual(len(node['commands']),4)
 
     def test_timeout_attempt_is_recorded_and_no_old_result_used(self):
         node,result,wait=self.run_ping([0,TimeoutError('fixture')])

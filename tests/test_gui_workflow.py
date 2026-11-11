@@ -14,6 +14,7 @@ from topolog.resultdir import records as R  # noqa: E402
 from topolog import gui
 from topolog.engine import Runner
 from test_batch import FakeAPI, collected, project, P, N
+Q = '00000000-0000-0000-0000-0000000000a2'
 
 
 class GuiTests(unittest.TestCase):
@@ -35,6 +36,7 @@ class GuiTests(unittest.TestCase):
         self.preflight = patch('topolog.gui.preflight.prepare', return_value={'gui_running': True}).start()
         patch('topolog.gui.preflight.gui_running', return_value=True).start()
         self.errors = patch('topolog.gui.messagebox.showerror').start()
+        self.ask_retake = patch('topolog.gui.messagebox.askyesno', return_value=False).start()   # 'save pictures again?' after a run
         self.browser = patch('topolog.gui.webbrowser.open', return_value=True).start()
         patch('topolog.gui.open_report', side_effect=lambda p: gui.webbrowser.open(p.as_uri())).start()
         self.window = gui.launch(run_loop=False)
@@ -112,17 +114,162 @@ class GuiTests(unittest.TestCase):
         self.assertIs(self.preflight.call_args.args[1], True)
         self.assertNotIn('auto_start_gns3', self.save_settings.call_args.kwargs)
 
-    def test_annotation_checkbox_reaches_runner_and_title_tool_exists(self):
+    def test_picture_page_has_one_choice_and_missing_pictures_are_offered_again_after_the_run(self):
         seen = {}
         self.assertIn('titles', self.ui['actions'])
-        self.assertTrue(self.ui['annotate'].get())
-        self.ui['annotate'].set(False)
+        self.assertNotIn('annotate', self.ui)                  # annotation copies are always made; titles come later
+        self.assertNotIn('retry_photos', self.ui)
+        retaken = []
+        def retake(api, folder, root, **kwargs):
+            retaken.append(Path(folder))
+            report = json.loads((R(folder) / 'summary.json').read_text(encoding='utf-8'))
+            return report
+        self.ask_retake.return_value = True
+        with patch('topolog.gui.connect', return_value=FakeAPI()), patch('topolog.gui.prepare_server'), \
+             patch('topolog.gui.Runner', side_effect=self.runner(seen)), patch('topolog.engine.retake_pictures', side_effect=retake):
+            self.ui['actions']['run'].invoke()
+            self.finish_worker()                                    # run, question, then the retake worker
+            deadline = time.monotonic() + 4
+            while (self.ui['state']['running'] or not retaken) and time.monotonic() < deadline:
+                self.window.update(); time.sleep(.01)
+            self.finish_worker()
+        self.assertIs(seen['annotate'], True)
+        self.assertNotIn('retry_photos', seen)
+        self.assertEqual(self.ask_retake.call_count, 1)            # asked once, not again after the retake
+        self.assertIn('다시 저장', self.ask_retake.call_args.args[0])
+        self.assertEqual(retaken, [self.ui['state']['result']])
+        self.assertTrue(self.ui['actions']['retake'].instate(['!disabled']))   # still missing: the button stays available
+
+    def test_projects_are_ticked_one_by_one_and_only_ticked_ones_run(self):
+        project(self.labs, 'switching', Q)
+        seen = {}
+        self.ui['go'](4)
+        tree = self.ui['tree']
+        self.assertEqual(sorted(tree.get_children()), sorted([P, Q]))
+        self.assertIn('2/2개', self.ui['pick_text'].get())
+        tree.focus(Q)
+        self.ui['toggle_project']()                             # space bar on the focused row
+        self.assertEqual(self.ui['state']['selected'], {P})
+        self.assertEqual(tree.item(Q)['values'][0], '선택 안 함')
+        self.assertIn('1/2개', self.ui['pick_text'].get())
         with patch('topolog.gui.connect', return_value=FakeAPI()), patch('topolog.gui.prepare_server'), \
              patch('topolog.gui.Runner', side_effect=self.runner(seen)):
             self.ui['actions']['run'].invoke()
             self.finish_worker()
-        self.assertIs(seen['annotate'], False)
-        self.assertIs(self.save_settings.call_args.kwargs['annotate'], False)
+        self.assertEqual(seen['project_ids'], {P})
+        report = json.loads((R(self.ui['state']['result']) / 'summary.json').read_text(encoding='utf-8'))
+        self.assertEqual([p['project_id'] for p in report['projects']], [P])
+        self.ui['pick_none'].invoke()
+        self.assertEqual(self.ui['state']['selected'], set())
+        with patch('topolog.gui.connect') as connection:
+            self.ui['actions']['run'].invoke()
+            connection.assert_not_called()                      # nothing ticked: nothing starts
+        self.errors.assert_called_once()
+        self.errors.reset_mock()
+        self.ui['pick_all'].invoke()
+        self.assertIsNone(self.ui['state']['selected'])
+
+    def test_run_error_opens_the_report_window_and_sends_only_after_agreement(self):
+        def runner(*args, **kwargs):
+            raise RuntimeError('fixture failure')
+        with patch('topolog.gui.connect', return_value=FakeAPI()), patch('topolog.gui.prepare_server'), \
+             patch('topolog.gui.Runner', side_effect=runner), patch('topolog.errorreport.send', return_value='abc') as send, \
+             patch('topolog.gui.log_directory', return_value=self.root / 'logs'):
+            self.ui['actions']['run'].invoke()
+            deadline = time.monotonic() + 4
+            while self.ui['state']['running'] and time.monotonic() < deadline:
+                self.window.update(); time.sleep(.01)
+            top = self.ui['state']['report_window']
+            buttons = {}
+            def walk(widget):
+                for child in widget.winfo_children():
+                    if child.winfo_class() == 'TButton':
+                        buttons[child.cget('text')] = child
+                    if child.winfo_class() == 'TCheckbutton':
+                        buttons['agree'] = child
+                    walk(child)
+            walk(top)
+            self.assertTrue(buttons['보내기'].instate(['disabled']))
+            buttons['보내기'].invoke()
+            send.assert_not_called()                                   # no agreement, nothing sent
+            buttons['agree'].invoke()
+            buttons['보내기'].invoke()
+            deadline = time.monotonic() + 2
+            while not send.called and time.monotonic() < deadline:
+                self.window.update(); time.sleep(.01)
+            send.assert_called_once()
+            self.assertIn('fixture failure', send.call_args.args[0]['preview'])
+            self.assertTrue(list((self.root / 'logs').glob('error-report-*.txt')))
+            for _ in range(5):
+                self.window.update(); time.sleep(.12)                 # let the result reach the window
+            top.destroy()
+            self.window.update()
+        self.errors.reset_mock()
+
+    def widgets(self, top):
+        found = {}
+        def walk(widget):
+            for child in widget.winfo_children():
+                if child.winfo_class() in ('TButton', 'TCheckbutton'):
+                    found[child.cget('text')] = child
+                if child.winfo_class() == 'Text':
+                    found.setdefault('texts', []).append(child)
+                walk(child)
+        walk(top)
+        return found
+
+    def test_button_handler_error_opens_one_report_window(self):
+        def broken():
+            raise KeyError('fixture handler bug')
+        self.window.report_callback_exception(KeyError, KeyError('fixture handler bug'), None)
+        top = self.ui['state']['report_window']
+        self.assertEqual(top.title(), '오류 보고')
+        preview = self.widgets(top)['texts'][0].get('1.0', 'end')
+        self.assertIn('fixture handler bug', preview)
+        self.ui['report_error']('second error')                         # no second window
+        self.assertIs(self.ui['state']['report_window'], top)
+        self.assertIn('second error', '\n'.join(self.ui['state']['log']))
+        top.destroy()
+
+    def test_feedback_needs_text_and_can_leave_the_log_out(self):
+        with patch('topolog.errorreport.send', return_value='fb1') as send, \
+             patch('topolog.gui.log_directory', return_value=self.root / 'logs'):
+            top = self.ui['report_error'](feedback=True)
+            self.assertEqual(top.title(), '피드백 보내기')
+            found = self.widgets(top)
+            comment, preview = found['texts']
+            found['위 내용을 개발자에게 보내는 데 동의합니다'].invoke()
+            found['보내기'].invoke()
+            send.assert_not_called()                                    # empty text is not sent
+            comment.insert('1.0', '사진 제목 창이 작아요')
+            found['상세 실행 기록 함께 보내기(아래 내용)'].invoke()          # leave the log out
+            self.assertIn('보내지 않습니다', preview.get('1.0', 'end'))
+            found['보내기'].invoke()
+            deadline = time.monotonic() + 2
+            while not send.called and time.monotonic() < deadline:
+                self.window.update(); time.sleep(.01)
+            report = send.call_args.args[0]
+            self.assertIn('사진 제목 창이 작아요', report['preview'])
+            self.assertEqual(report['log'], '')
+            self.assertEqual(report['event']['level'], 'info')
+            for _ in range(5):
+                self.window.update(); time.sleep(.12)
+            top.destroy()
+
+    def test_projects_sharing_an_id_are_announced_and_run_from_a_copy(self):
+        (self.labs / 'copy').mkdir()
+        project(self.labs / 'copy', 'routing-copy', P)              # same ID, copied folder
+        with patch('topolog.gui.messagebox.askokcancel', return_value=False) as ask:
+            self.ui['actions']['next'].invoke()
+        self.assertEqual(self.ui['state']['step'], 0)                # cancel goes back
+        self.assertIn('임시 폴더에 복사', ask.call_args.args[1])
+        self.assertIn('routing', ask.call_args.args[1])
+        with patch('topolog.gui.messagebox.askokcancel', return_value=True):
+            self.ui['actions']['next'].invoke()
+        self.assertEqual(self.ui['state']['step'], 1)
+        self.ui['go'](4)
+        self.assertIn('임시 사본으로 수집 1개', self.ui['summary']['대상 프로젝트'].get())
+        self.assertEqual(len(self.ui['tree'].get_children()), 2)
 
     def test_every_check_box_shows_a_tick_not_the_theme_cross(self):
         from tkinter import ttk

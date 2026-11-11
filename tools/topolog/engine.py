@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 import time
+import shutil
 import uuid
 import zipfile
 from urllib.error import HTTPError
@@ -14,8 +15,11 @@ from datetime import datetime, timezone
 from . import profiles
 from .transport import Console, CLI_ERROR, EnableSetupRequired
 from . import runtime
+from .projectcopy import api_id, open_file
 
 
+DUPLICATE_OPENED = ('GNS3에서 같은 프로젝트 ID의 다른 폴더 프로젝트({path}, 이름 「{name}」)가 열려 있어 임시 사본으로도 수집하지 않았습니다. '
+                    '같은 장비가 동시에 켜져 포트가 겹칠 수 있기 때문입니다. GNS3에서 그 프로젝트를 닫은 뒤 다시 실행하세요.')
 DUPLICATE_PROJECT = ('GNS3에 같은 프로젝트 ID가 다른 폴더({path}, 이름 「{name}」)로 이미 등록되어 있어 설정한 폴더({selected})의 '
                      '프로젝트를 열 수 없습니다. GNS3는 한 ID에 한 프로젝트만 열기 때문에 그대로 열면 다른 폴더의 사본을 수집하게 되므로 '
                      '이 프로젝트는 수집하지 않았습니다. 그 사본을 GNS3 프로젝트 폴더 밖으로 옮기거나, TopoLog의 프로젝트 폴더를 그 위치로 설정한 뒤 '
@@ -182,7 +186,9 @@ def discover(root):
             pid = guid(data['project_id'])
             record.update(project_id=pid, name=data.get('name', path.stem), source_sha256=hashlib.sha256(content).hexdigest())
             if pid in seen:
-                raise ValueError('Duplicate project UUID')
+                # A copied folder keeps the GNS3 ID. It gets its own TopoLog key and is collected through a temporary copy.
+                from .projectcopy import derived_id
+                record.update(project_id=derived_id(pid, record['file']), source_project_id=pid)
             seen.add(pid)
         except (OSError, ValueError, KeyError) as exc:
             record.update(status='excluded', reason=str(exc))
@@ -649,7 +655,7 @@ def verdict(nodes):
 
 
 class Runner:
-    def __init__(self, api, output, rules=None, collector=collect_node, settle_seconds=10, ready_timeout=120, cancel=None, progress=None, compute_timeout=300, enable=True, enable_password=None, password_provider=None, capture=False, reachability=True, console_factory=Console, project_ids=None, retry_source=None, progress_state=None, console_workers=3, detail_scope='representative', pause=None, annotate=True):
+    def __init__(self, api, output, rules=None, collector=collect_node, settle_seconds=10, ready_timeout=120, cancel=None, progress=None, compute_timeout=300, enable=True, enable_password=None, password_provider=None, capture=False, reachability=True, console_factory=Console, project_ids=None, retry_source=None, progress_state=None, console_workers=3, detail_scope='representative', pause=None, annotate=True, retry_photos=False):
         self.api, self.output = api, Path(output)
         self.rules, self.collector = rules or {}, collector
         self.settle_seconds, self.ready_timeout = settle_seconds, ready_timeout
@@ -660,6 +666,9 @@ class Runner:
         self._password_provider,self.capture=password_provider,capture
         self._capture_job=None
         self.annotate=annotate
+        # Pictures that could not be saved are normally retaken on request after the run (retake_pictures);
+        # retry_photos=True does it at the end of the run instead.
+        self.retry_photos=retry_photos
         self.password_provider=self._ask_password if password_provider else None
         self.reachability,self.console_factory=reachability,console_factory
         # Passwords typed during this run stay in memory only and are tried on later devices.
@@ -678,7 +687,7 @@ class Runner:
     def _start_capture(self, entry, root, folder):
         from .topology import capture_native
         self.progress('GNS3 사진을 저장합니다. 저장 창이 닫힐 때까지 마우스·키보드 조작을 잠시 멈춰 주세요.')
-        job = CaptureJob(capture_native, self._gui_name(entry, root), root / entry['file'], folder / 'capture', self.cancel)
+        job = CaptureJob(capture_native, self._gui_name(entry, root), open_file(entry, root), folder / 'capture', self.cancel)
         self._capture_job = job
         job.start()
         return job
@@ -691,7 +700,7 @@ class Runner:
         the file's name. Matching the window title against the file name then never succeeds.
         """
         try:
-            info = self.api.call('/v2/projects/' + entry['project_id'])
+            info = self.api.call('/v2/projects/' + api_id(entry))
         except Exception:
             return entry['name']
         shown = str(info.get('name') or entry['name'])
@@ -706,6 +715,99 @@ class Runner:
             job.join(.2)
         return job.result or {'status': 'unavailable', 'reason': 'GNS3 사진 저장 결과가 없습니다.'}
 
+    def _retry_pictures(self, root, entries, data, report):
+        """Open each project whose GNS3 picture failed again and save the picture once more.
+
+        The devices this run had started are started again for the picture (GNS3 shows
+        their state), then stopped; a project this run opened is closed again. The first
+        attempt's record stays in capture-<n> and in the picture entry.
+        """
+        targets = failed_pictures({'projects': entries})
+        if not targets:
+            return
+        summary = report['photo_retry'] = {'when': self.retry_when, 'projects': len(targets), 'captured': 0}
+        for index, entry in enumerate(targets):
+            self.safe_point('사진 다시 저장 전')
+            pid, folder = api_id(entry), data / entry['folder']
+            prefix = '/v2/projects/' + pid
+            first = entry['topology_images']['native']
+            attempt = ((first.get('retry') or {}).get('attempt') or 1) + 1
+            self.progress_state({'fraction': .95, 'stage': 'GNS3 사진 다시 저장 {}/{} · {}'.format(index + 1, len(targets), entry['name']),
+                                 'project_id': entry['project_id'], 'task': CAPTURE_NOTICE})
+            self.progress('저장하지 못한 GNS3 사진을 다시 저장합니다: ' + entry['name'])
+            opened, started = False, []
+            outcome = None
+            try:
+                source = (root / entry['file'])
+                if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != entry.get('source_sha256'):
+                    outcome = {**first, 'retry': {'attempt': attempt, 'status': 'skipped',
+                                                  'reason': '수집한 뒤 프로젝트 파일이 바뀌거나 없어져 다시 저장하지 않았습니다.'}}
+                    continue
+                if (entry.get('gns3_copy') or {}).get('removed'):
+                    # The run's temporary copy is gone; a new one is made for the picture.
+                    real = entry.get('source_project_id') or entry['project_id']
+                    other = next((p for p in self.api.call('/v2/projects') if p['project_id'] == real), None)
+                    self._use_copy(entry, root, other)
+                    pid, prefix = api_id(entry), '/v2/projects/' + api_id(entry)
+                registered = self.api.call('/v2/projects')
+                before = next((p for p in registered if p['project_id'] == pid), None)
+                if before is not None and not same_folder(before.get('path'), open_file(entry, root).parent):
+                    outcome = {**first, 'retry': {'attempt': attempt, 'status': 'skipped', 'reason': 'GNS3에 다른 폴더의 같은 프로젝트가 열려 있습니다.'}}
+                    continue
+                if before is None:
+                    opened = True
+                    loaded = self.api.call('/v2/projects/load', 'POST', {'path': str(open_file(entry, root))})
+                    if loaded['project_id'] != pid:
+                        raise ValueError('Loaded project identity differs from selected file')
+                elif before['status'] != 'opened':
+                    opened = True
+                    self.api.call(prefix + '/open', 'POST')
+                ran = {r['node_id'] for r in entry['nodes'] if r.get('collection') not in ('not_run', 'pending')}
+                for node in self.api.call(prefix + '/nodes'):
+                    nid = node.get('node_id')
+                    if nid in ran and node.get('status') == 'stopped' and node.get('node_type') not in BUILTIN_TYPES:
+                        started.append(nid)
+                        self.api.call(prefix + '/nodes/' + nid + '/start', 'POST')
+                capture = folder / 'capture'
+                if capture.exists():
+                    earlier = folder / 'capture-{}'.format(attempt - 1)
+                    if earlier.exists():
+                        shutil.rmtree(earlier)
+                    capture.rename(earlier)
+                outcome = self._finish_capture(self._start_capture(entry, root, folder))
+                outcome['retry'] = {'attempt': attempt, 'when': self.retry_when, 'first_reason': first.get('reason', ''),
+                                    **({'first_record': 'capture-{}'.format(attempt - 1)} if (folder / 'capture-{}'.format(attempt - 1)).exists() else {})}
+                if outcome.get('status') == 'captured':
+                    summary['captured'] += 1
+                    self.progress('토폴로지 사진: 다시 저장 완료 · ' + entry['name'])
+                else:
+                    self.progress('다시 시도했지만 GNS3 사진을 저장하지 못했습니다: ' + entry['name'])
+            except (InterruptedError, KeyboardInterrupt):
+                raise
+            except Exception as exc:
+                outcome = {**first, 'retry': {'attempt': attempt, 'status': 'failed', 'reason': error_detail(exc)}}
+            finally:
+                self._capture_job = None
+                for nid in reversed(started):
+                    try:
+                        self.api.call(prefix + '/nodes/' + nid + '/stop', 'POST')
+                    except Exception:
+                        entry.setdefault('cleanup_errors', []).append('Could not stop ' + nid + ' after picture retry')
+                if opened:
+                    try:
+                        self.api.call(prefix + '/close', 'POST')
+                    except Exception:
+                        entry.setdefault('cleanup_errors', []).append('Could not close project after picture retry')
+                if entry.get('cleanup_errors'):
+                    entry['status'] = 'cleanup_failed'
+                if outcome is not None:
+                    entry['topology_images']['native'] = outcome
+                save(folder / 'result.json', entry)
+                save(data / 'summary.json', report)
+                self.progress_state({'project_done': entry['project_id'], 'project_status': entry.get('status'), 'photo': entry['topology_images']['native'].get('status')})
+
+    retry_when = 'after_all_projects'
+
     def _ask_password(self, name):
         # A password dialog raised over GNS3's save window could redirect the save, so wait for it.
         job = self._capture_job
@@ -719,6 +821,43 @@ class Runner:
             self.pause.wait(self.cancel, where)
         self.check_cancel()
 
+    def _use_copy(self, entry, root, registered):
+        """Make the temporary copy of this project (raises ValueError when it cannot be made)."""
+        from . import projectcopy
+        # The other project with this ID open in GNS3 (devices possibly running with the same node IDs and ports): not copied.
+        if registered is not None and registered.get('status') == 'opened':
+            entry['gns3_registered_project'] = {'name': registered.get('name'), 'path': registered.get('path')}
+            raise ValueError(DUPLICATE_OPENED.format(path=registered.get('path'), name=registered.get('name')))
+        new_id = str(uuid.uuid4())
+        self.progress('같은 GNS3 ID의 다른 프로젝트가 있어 임시 사본으로 수집합니다: ' + entry['name'])
+        copied = projectcopy.make(root / entry['file'], projectcopy.work_root(self.output), new_id, entry['folder'])
+        entry['gns3_copy'] = {'project_id': new_id, 'path': str(copied), 'source_file': str(root / entry['file']),
+                              'reason': 'same_folder' if entry.get('source_project_id') else 'registered_elsewhere',
+                              'other': (registered or {}).get('path') if registered else None}
+
+    def _remove_copies(self, entries, report):
+        """Delete the temporary copies from GNS3 and from disk once every project and picture retry is done."""
+        from . import projectcopy
+        root = projectcopy.work_root(self.output)
+        copies = [e for e in entries if e.get('gns3_copy')]
+        if not copies and not root.exists():
+            return
+        errors = []
+        for entry in copies:
+            copy = entry['gns3_copy']
+            try:
+                info = self.api.call('/v2/projects/' + copy['project_id'])
+                # Only a project whose files are inside this run's temporary folder is ever deleted.
+                if projectcopy.is_inside(info.get('path', ''), root):
+                    self.api.call('/v2/projects/' + copy['project_id'], 'DELETE')
+            except Exception as exc:
+                errors.append('{}: GNS3에서 임시 사본 정리 실패({})'.format(entry['name'], type(exc).__name__))
+            copy['removed'] = True
+        problem = projectcopy.remove(root)
+        if problem:
+            errors.append(problem)
+        report['temporary_copies'] = {'projects': len(copies), 'folder': str(root), 'removed': not root.exists(), 'errors': errors}
+
     def run(self, root):
         runtime.ensure_current()
         root, entries = discover(root)
@@ -730,6 +869,11 @@ class Runner:
         if Path(str(self.output) + '.zip').exists():
             raise FileExistsError('Output ZIP exists')
         self.output.mkdir(parents=True, exist_ok=False)
+        from . import projectcopy
+        for old in projectcopy.leftovers(self.output.parent):
+            # Copies an interrupted earlier run could not delete.
+            problem = projectcopy.remove(old)
+            self.progress(problem or '이전 실행에서 남은 임시 사본을 지웠습니다: ' + str(old))
         # Only what people open stays at the top of the result; evidence and records go one level down.
         from .resultdir import RECORDS
         data = self.output / RECORDS
@@ -744,6 +888,12 @@ class Runner:
         def advance(index,phase,label,task=None):
             self.progress_state({'fraction':.95*(index+phase)/max(1,len(entries)),'stage':label,'project_index':index+1,'project_total':len(entries),
                                  'project_name':entries[index].get('name',''),'project_id':entries[index].get('project_id'),'task':task or label})
+        # Evidence folders carry the project and device names so people can find them without the GNS3 ids.
+        from .resultdir import folder_name, node_dir
+        project_names = set()
+        for entry in entries:
+            if entry['status'] != 'excluded':
+                entry['folder'] = folder_name(entry.get('name') or Path(entry['file']).stem, project_names, 'project')
         try:
             for project_index,entry in enumerate(entries):
                 if entry['status'] == 'excluded':
@@ -751,7 +901,7 @@ class Runner:
                 self.safe_point('프로젝트 시작 전')
                 pid = entry['project_id']
                 prefix = '/v2/projects/' + pid
-                folder = data / pid
+                folder = data / entry['folder']
                 folder.mkdir()
                 opened, started, capture_job = False, [], None
                 entry.update(nodes=[], cleanup_errors=[],started_at=now())
@@ -772,14 +922,19 @@ class Runner:
                     if required:
                         wait_computes(self.api, required, self.compute_timeout, self.cancel, self.progress)
                     registered = self.api.call('/v2/projects')
-                    before = next((p for p in registered if p['project_id'] == pid), None)
-                    if before is not None and not same_folder(before.get('path'), (root / entry['file']).parent):
-                        # GNS3 keeps one project per ID. Opening would silently use the other copy
-                        # (its devices, configs and picture), so nothing is collected from it.
-                        entry['gns3_registered_project'] = {'name': before.get('name'), 'path': before.get('path')}
-                        raise ValueError(DUPLICATE_PROJECT.format(path=before.get('path'), name=before.get('name'),
-                                                                  selected=(root / entry['file']).parent))
-                    if before is None:
+                    real_id = entry.get('source_project_id') or pid
+                    before = next((p for p in registered if p['project_id'] == real_id), None)
+                    if entry.get('source_project_id') or (before is not None and not same_folder(before.get('path'), (root / entry['file']).parent)):
+                        # GNS3 keeps one project per ID; opening this file would show the other copy.
+                        # A temporary copy with its own ID is collected instead; the user's files are only read.
+                        self._use_copy(entry, root, before)
+                        pid_api = entry['gns3_copy']['project_id']
+                        prefix = '/v2/projects/' + pid_api
+                        opened = True
+                        loaded = self.api.call('/v2/projects/load', 'POST', {'path': entry['gns3_copy']['path']})
+                        if loaded['project_id'] != pid_api:
+                            raise ValueError('Loaded copy identity differs from the temporary copy')
+                    elif before is None:
                         # Local controller must be able to access this file path.
                         opened = True
                         loaded = self.api.call('/v2/projects/load', 'POST', {'path': str(root / entry['file'])})
@@ -795,9 +950,11 @@ class Runner:
                     expected = spec.get('nodes', {})
                     entry['missing_rule_nodes'] = sorted(set(expected) - {n['node_id'] for n in nodes})
                     records = {}
+                    node_names = set()
                     for node in nodes:
                         nid = guid(node['node_id'])
                         record = {'node_id': nid, 'name': node.get('name', ''), 'node_type': node['node_type'],
+                                  'folder': folder_name(node.get('name'), node_names, 'node'),
                                   'collection': 'pending', 'checks': [{'status': 'inconclusive', 'reason': 'Startup not completed'}]}
                         records[nid] = record
                         entry['nodes'].append(record)
@@ -854,13 +1011,13 @@ class Runner:
                             if record['node_type'] in BUILTIN_TYPES:
                                 record.update(describe_builtin(fresh))
                                 if record.get('switch_ports') is not None:
-                                    save(folder/nid/'switch-ports.json',{'source':'GNS3 API node properties.ports_mapping','ports':record['switch_ports']})
+                                    save(folder/record['folder']/'switch-ports.json',{'source':'GNS3 API node properties.ports_mapping','ports':record['switch_ports']})
                                 elif record.get('builtin_ports') is not None:
-                                    save(folder/nid/'builtin-ports.json',{'source':'GNS3 API node properties','ports':record['builtin_ports']})
+                                    save(folder/record['folder']/'builtin-ports.json',{'source':'GNS3 API node properties','ports':record['builtin_ports']})
                             else:
                                 notify('Node: '+record['name'])
-                                fresh['project_id']=pid
-                                record.update(self.collector(worker_api,fresh,folder/nid,expected.get(nid,{}),spec.get('profiles',[]),
+                                fresh['project_id']=api_id(entry)
+                                record.update(self.collector(worker_api,fresh,folder/record['folder'],expected.get(nid,{}),spec.get('profiles',[]),
                                     ready_timeout=self.ready_timeout,cancel=self.cancel,progress=notify,
                                     enable=self.enable,enable_password=self.enable_password,password_provider=self.password_provider,
                                     known_passwords=self.known_passwords))
@@ -966,7 +1123,7 @@ class Runner:
                         if record['collection'] == 'pending':
                             record.update(collection='not_run', reason='Project interrupted before collection',
                                           checks=[{'status': 'unverified', 'reason': 'Collection not attempted'}])
-                        node_folder = folder / record['node_id']
+                        node_folder = folder / node_dir(record)
                         save(node_folder / 'collection.json', record)
                     remaining = list(reversed(started))
                     others = {r['node_id'] for r in entry['nodes']} - set(started)
@@ -1011,6 +1168,15 @@ class Runner:
                 report['verdict'] = 'failed'
             elif entries and not report['unmatched_rule_projects'] and not report.get('cancelled') and all(p['status'] == 'completed' and p.get('verdict') == 'passed' for p in entries):
                 report['verdict'] = 'passed'
+            if self.capture and self.retry_photos and not report.get('cancelled'):
+                try:
+                    self._retry_pictures(root, entries, data, report)
+                except (InterruptedError, KeyboardInterrupt):
+                    report['cancelled'] = True
+            try:
+                self._remove_copies(entries, report)
+            except Exception as exc:
+                report['temporary_copies'] = {'errors': [error_detail(exc)]}
             if self.capture and self.annotate:
                 # One drawing process for every captured picture; evidence files are not touched.
                 self.progress_state({'fraction':.95,'stage':'GNS3 사진 자동 주석'})
@@ -1025,9 +1191,43 @@ class Runner:
         return report
 
 
+def failed_pictures(report):
+    """Projects of a finished run whose GNS3 picture was not saved and could be taken again."""
+    return [p for p in report.get('projects', []) if p.get('status') in ('completed', 'cleanup_failed') and p.get('nodes')
+            and p.get('folder') and ((p.get('topology_images') or {}).get('native') or {}).get('status') == 'unavailable'
+            and ((p.get('topology_images') or {}).get('native') or {}).get('retryable', True)]
+
+
+def retake_pictures(api, output, root, progress=None, cancel=None, progress_state=None):
+    """Save again the GNS3 pictures a finished run could not save, then rebuild that run's reports and ZIP.
+
+    Only the pictures change; the collected configurations and outputs stay as they were.
+    """
+    from .resultdir import records, top
+    from .presentation import refresh_report
+    output = top(Path(output))
+    data = records(output)
+    report = json.loads((data / 'summary.json').read_text(encoding='utf-8'))
+    runner = Runner(api, output, capture=True, cancel=cancel, progress=progress, progress_state=progress_state)
+    runner.retry_when = 'on_request_after_run'
+    root, _ = discover(root)
+    try:
+        runner._retry_pictures(root, report.get('projects', []), data, report)
+    finally:
+        runner._remove_copies(report.get('projects', []), report)
+        try:
+            from . import annotate
+            annotate.build_all(output, report['projects'], annotate.load_titles(output))
+        except Exception as exc:
+            report['annotation_error'] = error_detail(exc)
+        save(data / 'summary.json', report)
+        refresh_report(output)
+    return report
+
+
 def write_collection_record(output, report):
     from .naming import report_files
-    from .resultdir import records, prefix
+    from .resultdir import records, prefix, project_dir, node_dir, node_dir_of
     names=report_files(report)
     from .findings import collection_rows as rows
     findings=rows(report)
@@ -1073,9 +1273,9 @@ def write_collection_record(output, report):
                 if check.get('reason') and check.get('status')!='unverified':
                     lines.append('    출력 참고: ' + check['reason'])
                 if check.get('evidence'):
-                    lines.append('    근거: {}/{}/{}'.format(project.get('project_id', ''), node['node_id'], check['evidence']))
+                    lines.append('    근거: {}/{}/{}'.format(project_dir(project), node_dir(node), check['evidence']))
                 for evidence in check.get('additional_evidence',[]):
-                    lines.append('    ASA 근거: {}/{}/{}'.format(project.get('project_id',''),evidence['node_id'],evidence['file']))
+                    lines.append('    {}: {}/{}/{}'.format(evidence.get('label') or '추가 근거',project_dir(project),node_dir_of(project,evidence['node_id']),evidence['file']))
         lines.extend('- 기준 대상 노드 없음: ' + nid for nid in project.get('missing_rule_nodes', []))
         lines.extend('- 복구 오류: ' + error for error in project.get('cleanup_errors', []))
     lines.extend('- 기준 대상 프로젝트 없음: ' + pid for pid in report.get('unmatched_rule_projects',[]))

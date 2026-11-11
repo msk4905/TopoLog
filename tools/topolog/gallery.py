@@ -55,9 +55,9 @@ def planned(report):
 
 def source(report, project, kind):
     """Original picture, relative to the top of the result folder."""
-    from .resultdir import prefix
+    from .resultdir import prefix, project_dir
     item = (project.get('topology_images') or {}).get(kind) or {}
-    return '{}{}/{}'.format(prefix(report), project.get('project_id', ''), item.get('file', '')) if item.get('file') else None
+    return '{}{}/{}'.format(prefix(report), project_dir(project), item.get('file', '')) if item.get('file') else None
 
 
 def build(report, output):

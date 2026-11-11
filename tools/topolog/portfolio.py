@@ -75,8 +75,8 @@ PRINCIPLES = {
 # ---------------------------------------------------------------- data
 
 def _project_topology(output, project):
-    from .resultdir import records
-    path = records(output) / str(project.get('project_id', '')) / 'topology.json'
+    from .resultdir import records, project_dir
+    path = records(output) / project_dir(project) / 'topology.json'
     try:
         return json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
@@ -394,9 +394,9 @@ def build(report, output, files=(), annotated=False):
         blocks.append(('h2', '구성과 목적'))
         blocks.append(('p', _purpose(project, counts)))
         from .gallery import path_for
-        from .resultdir import prefix
+        from .resultdir import prefix, project_dir
         def gallery_source(report, project):
-            return prefix(report) + str(project.get('project_id', '')) + '/capture/gns3-topology.png'
+            return prefix(report) + project_dir(project) + '/capture/gns3-topology.png'
         image = output / (path_for(report, project, 'native', output) or (gallery_source(report, project)))
         native = (project.get('topology_images') or {}).get('native') or {}
         use_annotated = annotated_report

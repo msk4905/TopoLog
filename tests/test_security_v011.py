@@ -11,6 +11,7 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from topolog.resultdir import records as R  # noqa: E402
+from topolog.resultdir import evidence_dir as E  # noqa: E402
 from topolog import sharing, security, portfolio, topology
 import test_portfolio as fixtures
 
@@ -84,7 +85,7 @@ class SecurityFollowupTests(unittest.TestCase):
             timing = result['projects'][0]['timing']['seconds']
             for stage in ('prepare_project', 'start_nodes', 'settle_wait', 'initial_collection', 'reachability', 'final_observation', 'cleanup_and_save'):
                 self.assertIn(stage, timing)
-            saved = json.loads((R(Path(temp) / 'out') / batch.P / 'result.json').read_text(encoding='utf-8'))
+            saved = json.loads((E(Path(temp) / 'out', batch.P) / 'result.json').read_text(encoding='utf-8'))
             self.assertIn('timing', saved)
 
 

@@ -392,7 +392,12 @@ class EngineTests(unittest.TestCase):
             (root / 'bad.gns3').write_text('{')
             _, entries = discover(root)
             self.assertEqual(len(entries), 3)
-            self.assertEqual(sum(x['status'] == 'excluded' for x in entries), 2)
+            # A copied project keeps the GNS3 ID: it stays collectable under its own TopoLog key.
+            self.assertEqual(sum(x['status'] == 'excluded' for x in entries), 1)
+            second = next(x for x in entries if x['file'] == 'b.gns3')
+            self.assertEqual(second['source_project_id'], P)
+            self.assertNotEqual(second['project_id'], P)
+            self.assertEqual(discover(root)[1][1]['project_id'], second['project_id'])   # same key on every scan
 
     def test_start_all_then_collect_preserve_and_continue(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -24,6 +24,7 @@ import struct
 import subprocess
 import zlib
 from pathlib import Path
+from .motw import PROCESS_POLICY
 
 FILE = 'capture/gns3-topology-annotated.png'
 RECORD = 'capture/annotation.json'
@@ -412,7 +413,7 @@ def render_windows(jobs):
         request = Path(temp) / 'jobs.json'
         request.write_text(json.dumps(jobs, ensure_ascii=False), encoding='utf-8')
         try:
-            completed = subprocess.run(['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+            completed = subprocess.run(['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', *PROCESS_POLICY, '-File',
                                         str(tool_directory() / 'annotate-topology.ps1'), '-Jobs', str(request)],
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30 + 10 * len(jobs),
                                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -434,8 +435,8 @@ def render_windows(jobs):
 def prepare(folder, project, titles=None, configs=None):
     """(record, job): job is None when nothing should be drawn for this project."""
     folder = Path(folder)
-    from .resultdir import records
-    base = records(folder) / str(project.get('project_id', ''))
+    from .resultdir import records, project_dir
+    base = records(folder) / project_dir(project)
     native = (project.get('topology_images') or {}).get('native') or {}
     record = {'kind': 'topolog_annotated_copy', 'source': native.get('file')}
     source = base / 'capture' / 'gns3-topology.png'
@@ -477,7 +478,7 @@ def prepare(folder, project, titles=None, configs=None):
 
 def build_all(folder, projects, titles=None, renderer=None):
     """Annotated copies for many projects with one drawing process; records are also written to disk."""
-    from .resultdir import records
+    from .resultdir import records, project_dir
     folder = Path(folder)
     data = records(folder)
     prepared = [(project, *prepare(folder, project, titles)) for project in projects
@@ -493,7 +494,7 @@ def build_all(folder, projects, titles=None, renderer=None):
             else:
                 record.pop('file', None)
                 record.update(status='unavailable', reason='자동 주석 그림을 만들지 못했습니다: ' + str(outcome or '')[:200])
-        _write_record(data / str(project.get('project_id', '')), record)
+        _write_record(data / project_dir(project), record)
         project.setdefault('topology_images', {})['annotated'] = summary_entry(record)
         records[project.get('project_id')] = record
     return records
@@ -542,7 +543,7 @@ def rebuild(folder, titles=None, renderer=None, progress=None):
 
 def overview(folder):
     """Rows for the title screen: project, photo path, features, candidate and saved choice."""
-    from .resultdir import records, top
+    from .resultdir import records, top, project_dir
     folder = top(Path(folder))
     report = json.loads((records(folder) / 'summary.json').read_text(encoding='utf-8'))
     titles = load_titles(folder)
@@ -550,7 +551,7 @@ def overview(folder):
     rows = []
     for project in report.get('projects', []):
         native = (project.get('topology_images') or {}).get('native') or {}
-        base = records(folder) / str(project.get('project_id', ''))
+        base = records(folder) / project_dir(project)
         try:
             topology = json.loads((base / 'topology.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):

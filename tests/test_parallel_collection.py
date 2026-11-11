@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 from topolog.resultdir import records as R  # noqa: E402
+from topolog.resultdir import evidence_dir as E  # noqa: E402
 from topolog.parallel import completed,LockedAPI
 from topolog.engine import Runner,obtain_privilege
 from topolog import reach
@@ -41,7 +42,7 @@ class ParallelTests(unittest.TestCase):
             nodes=result['projects'][0]['nodes']
             self.assertTrue(all(n['collection']=='collected' for n in nodes))
             self.assertEqual(len(nodes),2)
-            for n in nodes:self.assertEqual(json.loads((R(Path(temp)/'out')/fixtures.P/n['node_id']/'collection.json').read_text())['collection'],'collected')
+            for n in nodes:self.assertEqual(json.loads((E(Path(temp)/'out',fixtures.P,n['node_id'])/'collection.json').read_text())['collection'],'collected')
 
     def test_cancel_preserves_drained_worker_results_and_stops_after_exit(self):
         cancel=threading.Event();barrier=threading.Barrier(2);closed=set();lock=threading.Lock()

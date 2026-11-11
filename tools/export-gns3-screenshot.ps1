@@ -140,7 +140,7 @@ try {
             [IO.File]::WriteAllText($menuRequest,([ordered]@{process_id=$Gns3ProcessId;runtime_id=($toolsMenus[0].GetRuntimeId() -join ',');result_path=$menuResult;expand=$true}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
             $menuShell='powershell.exe';if($PSVersionTable.PSEdition -eq 'Core'){$menuShell='pwsh.exe'}
             $menuScript=Join-Path $PSScriptRoot 'invoke-gns3-action.ps1'
-            $menuWorker=Start-Process -FilePath (Join-Path $PSHOME $menuShell) -WindowStyle Hidden -PassThru -ArgumentList @('-NoLogo','-NoProfile','-File',('"'+$menuScript+'"'),'-RequestPath',('"'+$menuRequest+'"'))
+            $menuWorker=Start-Process -FilePath (Join-Path $PSHOME $menuShell) -WindowStyle Hidden -PassThru -ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','RemoteSigned','-File',('"'+$menuScript+'"'),'-RequestPath',('"'+$menuRequest+'"'))
             for($menuAttempt=1;$menuAttempt -le 12 -and -not $action;$menuAttempt++) {
                 Assert-TargetWindow
                 try {
@@ -184,7 +184,7 @@ try {
         $workerResult=Join-Path $workingDirectory ('native-action-result'+$suffix+'.json')
         $actionRequest=[ordered]@{process_id=$Gns3ProcessId;runtime_id=($action.GetRuntimeId() -join ',');result_path=$workerResult}
         [IO.File]::WriteAllText($workerRequest,($actionRequest|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
-        $worker=Start-Process -FilePath (Join-Path $PSHOME $shell) -WindowStyle Hidden -PassThru -ArgumentList @('-NoLogo','-NoProfile','-File',('"'+$workerScript+'"'),'-RequestPath',('"'+$workerRequest+'"'))
+        $worker=Start-Process -FilePath (Join-Path $PSHOME $shell) -WindowStyle Hidden -PassThru -ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','RemoteSigned','-File',('"'+$workerScript+'"'),'-RequestPath',('"'+$workerRequest+'"'))
         $deadline=[Diagnostics.Stopwatch]::StartNew()
         $failedAt=$null;$lastInvokeError=$null
         while($deadline.Elapsed.TotalSeconds -lt 10) {

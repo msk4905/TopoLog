@@ -86,6 +86,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     from . import runtime
     print('TopoLog ' + runtime.VERSION + ' · structured-html-v1')
+    from . import motw
+    unblocked = motw.describe(motw.unblock())
+    if unblocked:
+        print(unblocked)
     if args.gui:
         from .gui import launch
         launch()

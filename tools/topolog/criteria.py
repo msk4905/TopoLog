@@ -117,10 +117,11 @@ def reassess(source, output, criteria_path=None):
     report['unmatched_rule_projects'] = sorted(set(rules) - {p.get('project_id') for p in report['projects']})
     for project in report['projects']:
         pid = project.get('project_id')
+        from .resultdir import project_dir, node_dir
         spec = rules.get(pid, {})
         expected = spec.get('nodes', {})
         project['missing_rule_nodes'] = sorted(set(expected) - {n['node_id'] for n in project.get('nodes', [])})
-        saved_topology = source_data / str(pid) / 'topology.json'
+        saved_topology = source_data / project_dir(project) / 'topology.json'
         saved_nodes = {}
         if saved_topology.is_file():
             try:
@@ -135,8 +136,8 @@ def reassess(source, output, criteria_path=None):
                 # Re-derived only from the settings saved at collection time.
                 node.update(describe_builtin(saved_nodes.get(node['node_id'], node)))
                 if node.get('switch_ports') is not None:
-                    save(data / pid / node['node_id'] / 'switch-ports.json', {'source': 'saved topology.json node properties.ports_mapping', 'ports': node['switch_ports']})
-                save(data / pid / node['node_id'] / 'collection.json', node)
+                    save(data / project_dir(project) / node_dir(node) / 'switch-ports.json', {'source': 'saved topology.json node properties.ports_mapping', 'ports': node['switch_ports']})
+                save(data / project_dir(project) / node_dir(node) / 'collection.json', node)
                 continue
             node_spec = expected.get(node['node_id'], {})
             checks = node_spec.get('checks', [])
@@ -146,13 +147,13 @@ def reassess(source, output, criteria_path=None):
                               for check in checks]
             if not checks:
                 node['checks'] = [{'status': 'unverified', 'reason': 'No explicit expected behavior configured'}]
-            save(data / pid / node['node_id'] / 'collection.json', node)
-        topology_path = source_data / str(pid) / 'topology.json'
+            save(data / project_dir(project) / node_dir(node) / 'collection.json', node)
+        topology_path = source_data / project_dir(project) / 'topology.json'
         if not project.get('topology_links') and topology_path.is_file():
             project['topology_links'] = json.loads(topology_path.read_text(encoding='utf-8'))['links']
         if topology_path.is_file():
             from .topology import reconstruct
-            reconstruct(json.loads(topology_path.read_text(encoding='utf-8')),data/pid/'topology-reconstructed.svg')
+            reconstruct(json.loads(topology_path.read_text(encoding='utf-8')),data/project_dir(project)/'topology-reconstructed.svg')
             images=project.setdefault('topology_images',{})
             images['reconstructed']={'status':'generated','file':'topology-reconstructed.svg','kind':'API 좌표·연결 기반 재구성'}
             images.setdefault('native',{'status':'unavailable','reason':'기존 결과에 실제 GNS3 사진이 없습니다. 새 수집이 필요합니다.'})
@@ -160,15 +161,15 @@ def reassess(source, output, criteria_path=None):
         features.apply(project, expected)
         for node in project.get('nodes', []):
             if node.get('node_type') in BUILTIN_TYPES:continue
-            save(data / pid / node['node_id'] / 'collection.json', node)
-        if pid and (data / pid).is_dir():
-            save(data / pid / 'auto-criteria.json', {'schema':'topolog-auto-v1', 'nodes':
+            save(data / project_dir(project) / node_dir(node) / 'collection.json', node)
+        if pid and (data / project_dir(project)).is_dir():
+            save(data / project_dir(project) / 'auto-criteria.json', {'schema':'topolog-auto-v1', 'nodes':
                  {n['node_id']:n.get('automatic_checks',[]) for n in project.get('nodes',[]) if n.get('node_type') not in BUILTIN_TYPES}})
         project['verdict'] = verdict(project.get('nodes', []))
         if project['missing_rule_nodes'] and project['verdict'] != 'failed':
             project['verdict'] = 'inconclusive'
-        if pid and (data / pid).is_dir():
-            save(data / pid / 'result.json', project)
+        if pid and (data / project_dir(project)).is_dir():
+            save(data / project_dir(project) / 'result.json', project)
     report['verdict'] = 'inconclusive'
     if any(p.get('verdict') == 'failed' for p in report['projects']):
         report['verdict'] = 'failed'

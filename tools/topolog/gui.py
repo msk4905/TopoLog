@@ -1,7 +1,8 @@
 """Step-by-step setup, then one run screen for batch collection.
 
 Setup pages: folders → enable privilege → GNS3 pictures → report detail range
-→ confirm and run. GNS3 and its linked VM are always started when needed.
+→ confirm and run. The confirm page lists the projects with a check box each;
+only the checked ones are collected. GNS3 and its linked VM are always started when needed.
 Passwords stay in memory for this run only. Detailed messages are kept in a
 separate log view and a log file; the main screen shows plain progress.
 """
@@ -31,6 +32,8 @@ COLORS = {'bg': '#f4f6f8', 'panel': '#ffffff', 'side': '#1f3b4d', 'side_text': '
 STATUS_LABELS = {'pending': '수집 대기', 'excluded': '제외', 'completed': '완료', 'error': '오류', 'cancelled': '중지',
                  'cleanup_failed': '정리 오류', 'not_run': '실행 안 함'}
 PHOTO_LABELS = {'captured': '저장', 'unavailable': '없음'}
+# Button widths in characters: one width per row of buttons so they line up.
+RUN_WIDTH, NAV_WIDTH = 10, 10
 
 
 def log_directory():
@@ -107,9 +110,11 @@ def launch(run_loop=True):
     style.configure('Big.TLabel', background=COLORS['panel'], font=(family, 13, 'bold'), foreground='#17303f')
     style.configure('Warn.TLabel', background=COLORS['warn_bg'], foreground=COLORS['warn'], font=(family, 10, 'bold'), padding=8)
     style.configure('Error.TLabel', background=COLORS['panel'], foreground=COLORS['error'])
-    style.configure('Accent.TButton', font=(family, 11, 'bold'), padding=(16, 6), foreground='#ffffff', background=COLORS['accent'])
+    # Same font size and padding for every button so a row of buttons lines up at one height.
+    style.configure('Accent.TButton', font=(family, 10, 'bold'), padding=(14, 6), foreground='#ffffff', background=COLORS['accent'])
     style.map('Accent.TButton', background=[('disabled', '#9fb5bb'), ('active', '#125761')])
-    style.configure('TButton', padding=(10, 5))
+    style.configure('TButton', padding=(14, 6))
+    style.configure('TMenubutton', padding=(14, 6))
     style.configure('Treeview', rowheight=24, font=(family, 10))
     style.configure('Treeview.Heading', font=(family, 10, 'bold'))
     style.configure('Horizontal.TProgressbar', thickness=16, background=COLORS['accent'])
@@ -121,7 +126,6 @@ def launch(run_loop=True):
     allow_enable = tk.BooleanVar(value=defaults.get('allow_enable', True))
     default_password = tk.StringVar()
     capture = tk.BooleanVar(value=defaults.get('capture_screenshot', True))
-    annotate_photo = tk.BooleanVar(value=defaults.get('annotate', True))
     detail_scope = tk.StringVar(value=defaults.get('detail_scope', 'representative'))
     status = tk.StringVar(value='설정을 확인한 뒤 수집 시작을 누르세요.')
     folder_message = tk.StringVar(value='')
@@ -201,9 +205,9 @@ def launch(run_loop=True):
     for row, (label, variable) in enumerate([('GNS3 프로젝트 폴더', projects), ('결과 저장 폴더', output)]):
         ttk.Label(grid, text=label, style='Panel.TLabel').grid(row=row, column=0, sticky='w', pady=6)
         entry = ttk.Entry(grid, textvariable=variable)
-        entry.grid(row=row, column=1, sticky='ew', padx=10)
+        entry.grid(row=row, column=1, sticky='ew', padx=10, pady=6, ipady=4)
         button = ttk.Button(grid, text='폴더 선택', command=lambda v=variable: select_folder(v))
-        button.grid(row=row, column=2)
+        button.grid(row=row, column=2, sticky='ew', pady=6)
         controls.extend([entry, button])
     check_row = ttk.Frame(first, style='Panel.TFrame')
     check_row.pack(fill='x', pady=(10, 0))
@@ -232,21 +236,14 @@ def launch(run_loop=True):
     # Page 3: pictures
     third = page('실제 GNS3 토폴로지 사진', '켜면 프로젝트마다 GNS3 화면에서 해당 프로젝트를 열고 GNS3 자체 Screenshot 기능으로 사진을 저장합니다. '
                  '끄더라도 GNS3 API의 좌표·연결로 그린 재구성 그림은 항상 만들어지며, 두 그림은 보고서와 결과 폴더에서 구분됩니다.')
-    shooter = ttk.Checkbutton(third, text='실제 GNS3 토폴로지 사진 포함', variable=capture, style='Panel.TCheckbutton')
+    shooter = ttk.Checkbutton(third, text='실제 토폴로지 사진 저장', variable=capture, style='Panel.TCheckbutton')
     shooter.pack(anchor='w')
     controls.append(shooter)
     ttk.Label(third, text='사진을 저장하는 몇 초 동안 GNS3 창과 저장 창이 앞에 나타납니다. 이때 마우스·키보드로 창을 조작하면 저장이 취소될 수 있으니 '
               '잠시 기다려 주세요. 저장이 끝나면 보던 창을 다시 앞으로 돌려놓습니다.', style='Caption.TLabel', wraplength=740).pack(anchor='w', pady=(6, 8))
-    marker = ttk.Checkbutton(third, text='GNS3 사진 사본에 서브넷·cost 자동 주석 넣기', variable=annotate_photo, style='Panel.TCheckbutton')
-    marker.pack(anchor='w')
-    controls.append(marker)
-    ttk.Label(third, text='원래 사진은 그대로 두고 토폴로지_사진/GNS3_주석_추가본에 따로 저장합니다. GNS3에서 직접 글자를 넣어 둔 프로젝트는 건너뜁니다. '
-              '수집이 끝나면 사진 제목 정리 창이 열려 저장된 사진을 보며 제목을 고릅니다. 닫은 뒤 보고서가 열립니다.', style='Caption.TLabel', wraplength=740).pack(anchor='w', pady=(2, 8))
-
-    def sync_marker(*_):
-        if not state.get('running'):
-            marker.configure(state='normal' if capture.get() else 'disabled')
-    capture.trace_add('write', sync_marker)
+    ttk.Label(third, text='저장하지 못한 사진이 있으면 수집이 끝난 뒤 다시 저장할지 묻습니다(실행 화면의 \'사진 다시 저장\' 버튼으로도 할 수 있습니다). '
+              '서브넷·cost 주석 사본과 사진 제목은 수집이 끝난 뒤 열리는 사진 제목 정리 창에서 고릅니다.',
+              style='Caption.TLabel', wraplength=740).pack(anchor='w', pady=(2, 8))
     pair = ttk.Frame(third, style='Panel.TFrame')
     pair.pack(anchor='w')
     picture(pair, 'example-gns3-native.png', '실제 결과 예시: GNS3 Screenshot 기능으로 저장한 사진 (토폴로지_사진/GNS3_실제_사진)', 380, 260, 'left')
@@ -279,7 +276,7 @@ def launch(run_loop=True):
         row, column = 2 + index // 2, (index % 2) * 2
         ttk.Label(summary, text=key, style='Key.TLabel').grid(row=row, column=column, sticky='w', padx=(0, 10), pady=2)
         value = tk.StringVar()
-        ttk.Label(summary, textvariable=value, style='Value.TLabel').grid(row=row, column=column + 1, sticky='w', padx=(0, 24), pady=2)
+        ttk.Label(summary, textvariable=value, style='Value.TLabel', wraplength=300).grid(row=row, column=column + 1, sticky='w', padx=(0, 24), pady=2)
         summary_values[key] = value
     run_bar = ttk.Frame(fifth, style='Panel.TFrame')
     run_bar.pack(fill='x', pady=(12, 6))
@@ -301,6 +298,10 @@ def launch(run_loop=True):
     notice = ttk.Label(fifth, textvariable=notice_text, style='Warn.TLabel', wraplength=760)
     ttk.Label(fifth, textvariable=status, style='Panel.TLabel', wraplength=760).pack(anchor='w', pady=(6, 0))
     ttk.Label(fifth, textvariable=outcome_text, style='Value.TLabel', wraplength=760).pack(anchor='w', pady=(2, 6))
+    pick_bar = ttk.Frame(fifth, style='Panel.TFrame')
+    pick_bar.pack(fill='x', pady=(0, 4))
+    pick_text = tk.StringVar(value='')
+    ttk.Label(pick_bar, textvariable=pick_text, style='Panel.TLabel').pack(side='left')
     tree_frame = ttk.Frame(fifth, style='Panel.TFrame')
     tree_frame.pack(fill='both', expand=True)
     tree = ttk.Treeview(tree_frame, columns=('status', 'photo'), height=5)
@@ -384,12 +385,130 @@ def launch(run_loop=True):
                 raise InterruptedError('Cancelled while requesting password')
         return request.pop('password', None)
 
+    def report_error(error=None, feedback=False):
+        """Error report (opened automatically on a program error) or feedback (opened by the person).
+
+        Shows exactly what would be sent; nothing leaves the PC until the person ticks
+        agreement and presses send. Only one such window is open at a time.
+        """
+        from . import errorreport
+        current = state.get('report_window')
+        try:
+            if current is not None and current.winfo_exists():
+                current.lift()
+                if error:
+                    append('오류 보고 창이 이미 열려 있어 이 오류는 기록에만 남깁니다: ' + str(error)[:300])
+                return current
+        except tk.TclError:
+            pass
+        context = {'build': 'windows-exe' if resources.FROZEN else 'source', 'step': STEPS[state['step']]}
+        top = tk.Toplevel(window)
+        top.title('피드백 보내기' if feedback else '오류 보고')
+        top.geometry('760x600')
+        top.transient(window)
+        frame = ttk.Frame(top, padding=14)
+        frame.pack(fill='both', expand=True)
+        lead = ('사용하면서 불편했던 점이나 문제를 적어 개발자에게 보냅니다. ' if feedback else
+                '프로그램 오류가 발생했습니다. 아래 내용을 개발자에게 보내면 원인을 찾는 데 도움이 됩니다. ')
+        ttk.Label(frame, text=lead + '보내는 곳: Sentry(미국 서버, 30일 보관). 실행 기록에는 장비 설정·IP·프로젝트 이름이 들어 있을 수 있고, '
+                  '알려진 암호·키 형식과 사용자 폴더 이름은 가렸습니다. 동의하지 않으면 아무것도 보내지 않습니다.',
+                  wraplength=720, justify='left').pack(anchor='w')
+        # Buttons, result and agreement are packed from the bottom first so a long report never pushes them off the window.
+        buttons = ttk.Frame(frame)
+        buttons.pack(side='bottom', fill='x', pady=(10, 0))
+        agree = tk.BooleanVar(value=False)
+        attach = tk.BooleanVar(value=True)
+        result = tk.StringVar(value='')
+        ttk.Label(frame, textvariable=result, wraplength=720, justify='left').pack(side='bottom', anchor='w', pady=(6, 0))
+        ttk.Checkbutton(frame, text='위 내용을 개발자에게 보내는 데 동의합니다', variable=agree).pack(side='bottom', anchor='w')
+        comment = None
+        if feedback:
+            ttk.Label(frame, text='내용(필수)').pack(anchor='w', pady=(10, 2))
+            comment = tk.Text(frame, height=6, wrap='word')
+            comment.pack(fill='x')
+            ttk.Checkbutton(frame, text='상세 실행 기록 함께 보내기(아래 내용)', variable=attach).pack(anchor='w', pady=(8, 0))
+        box = ttk.Frame(frame)
+        box.pack(fill='both', expand=True, pady=10)
+        view = tk.Text(box, wrap='word', font=('Consolas' if os.name == 'nt' else 'TkFixedFont', 9))
+        bar = ttk.Scrollbar(box, command=view.yview)
+        view.configure(yscrollcommand=bar.set)
+        bar.pack(side='right', fill='y')
+        view.pack(fill='both', expand=True)
+
+        def current_report():
+            if feedback:
+                text = comment.get('1.0', 'end').strip() or '(내용 없음)'
+                return errorreport.build(text, state['log'] if attach.get() else (), dict(context, kind='feedback'), kind='feedback')
+            return errorreport.build(error or state.get('last_error') or '오류 내용 없음', state['log'], context)
+
+        def show(*_):
+            view.configure(state='normal')
+            view.delete('1.0', 'end')
+            report = current_report()
+            view.insert('end', report['log'] or '(실행 기록을 보내지 않습니다)' if feedback else report['preview'])
+            view.configure(state='disabled')
+        show()
+        attach.trace_add('write', show)
+        outcome = queue.Queue()
+
+        def done():
+            try:
+                kind, value = outcome.get_nowait()
+            except queue.Empty:
+                top.after(100, done)
+                return
+            if kind == 'sent':
+                result.set('보냈습니다. 보고 번호: ' + value)
+                append(('피드백' if feedback else '오류 보고') + '를 보냈습니다: ' + value)
+            else:
+                result.set('보내지 못했습니다(' + value + '). 보낼 내용은 ' + str(state.get('report_file')) + ' 에 저장했습니다. 이 파일을 직접 전달해 주세요.')
+                append('보고 전송 실패: ' + value)
+                send.state(['!disabled'])
+
+        def submit():
+            if not agree.get():
+                return
+            if feedback and not comment.get('1.0', 'end').strip():
+                result.set('보낼 내용을 적어 주세요.')
+                return
+            report = current_report()
+            send.state(['disabled'])
+            result.set('보내는 중입니다.')
+            try:
+                state['report_file'] = errorreport.keep(report, log_directory())
+            except OSError:
+                state['report_file'] = None
+
+            def work():
+                try:
+                    outcome.put(('sent', errorreport.send(report)))
+                except Exception as exc:
+                    outcome.put(('failed', type(exc).__name__))
+            threading.Thread(target=work, daemon=True).start()
+            top.after(100, done)
+        send = ttk.Button(buttons, text='보내기', style='Accent.TButton', command=submit, width=NAV_WIDTH, state='disabled')
+        send.pack(side='left')
+        ttk.Button(buttons, text='닫기', command=top.destroy, width=NAV_WIDTH).pack(side='right')
+        agree.trace_add('write', lambda *_: send.state(['!disabled'] if agree.get() else ['disabled']))
+        state['report_window'] = top
+        return top
+
+    def callback_failed(kind, value, trace):
+        """An exception inside a button or window handler: logged, shown, and offered as an error report."""
+        import traceback
+        text = ''.join(traceback.format_exception(kind, value, trace))
+        append('프로그램 오류: ' + text)
+        state['last_error'] = text
+        if not state['closing']:
+            report_error(text)
+    window.report_callback_exception = callback_failed
+
     # ---------- navigation ----------
-    back = ttk.Button(nav, text='이전', command=lambda: go(state['step'] - 1))
+    back = ttk.Button(nav, text='이전', command=lambda: go(state['step'] - 1), width=NAV_WIDTH)
     back.pack(side='left')
-    forward = ttk.Button(nav, text='다음', style='Accent.TButton', command=lambda: go(state['step'] + 1))
+    forward = ttk.Button(nav, text='다음', style='Accent.TButton', command=lambda: go(state['step'] + 1), width=NAV_WIDTH)
     forward.pack(side='right')
-    log_button = ttk.Button(nav, text='상세 기록 보기', command=show_log)
+    log_button = ttk.Button(nav, text='상세 기록 보기', command=show_log, width=NAV_WIDTH + 3)
     log_button.pack(side='right', padx=(0, 10))
 
     def scope_label():
@@ -400,25 +519,64 @@ def launch(run_loop=True):
         summary_values['프로젝트 폴더'].set(projects.get())
         summary_values['결과 저장 폴더'].set(output.get())
         summary_values['enable 권한'].set(('사용 · 기본 암호 ' + ('입력됨(저장 안 함)' if default_password.get() else '없음')) if allow_enable.get() else '사용 안 함')
-        summary_values['토폴로지 사진'].set(('GNS3 사진 + 자동 주석 + 재구성 그림' if annotate_photo.get() else 'GNS3 사진 + 재구성 그림')
-                                      if capture.get() else '재구성 그림만')
+        summary_values['토폴로지 사진'].set('GNS3 사진 + 자동 주석 + 재구성 그림' if capture.get() else '재구성 그림만')
         summary_values['보고서 범위'].set(scope_label())
         valid = [e for e in state['entries'] if e.get('status') == 'pending']
         chosen = len(state['selected']) if state['selected'] is not None else len(valid)
         overlap = len(state.get('duplicates') or [])
         summary_values['대상 프로젝트'].set('{}개{}{}'.format(chosen, ' (선택 범위)' if state['selected'] is not None else '',
-                                                    ' · GNS3 기본 폴더와 겹쳐 수집하지 않음 {}개'.format(overlap) if overlap else ''))
+                                                    ' · 같은 ID라 임시 사본으로 수집 {}개'.format(overlap) if overlap else ''))
+
+    def selectable():
+        return [e.get('project_id') for e in state['entries'] if e.get('status') == 'pending' and e.get('project_id')]
+
+    def picked(pid):
+        return state['selected'] is None or pid in state['selected']
 
     def fill_tree():
         tree.delete(*tree.get_children())
+        boxes = window._topolog_check_images
         for entry in state['entries']:
-            if state['selected'] is not None and entry.get('project_id') not in state['selected']:
-                continue
+            pid = entry.get('project_id')
             label = STATUS_LABELS.get(entry.get('status'), entry.get('status', ''))
             if entry.get('status') == 'excluded':
                 label += ' · 프로젝트 파일을 읽지 못함'
-            tree.insert('', 'end', iid=entry.get('project_id') or entry['file'], text=entry.get('name', Path(entry['file']).stem),
-                        values=(label, '' if entry.get('status') == 'excluded' else '—'))
+            elif not picked(pid):
+                label = '선택 안 함'
+            options = {}
+            if entry.get('status') == 'pending' and pid:
+                # The same tick images as the check boxes; greyed while a run is going.
+                options['image'] = boxes[(2 if state['running'] else 0) + (1 if picked(pid) else 0)]
+            tree.insert('', 'end', iid=pid or entry['file'], text=entry.get('name', Path(entry['file']).stem),
+                        values=(label, '' if entry.get('status') == 'excluded' else '—'), **options)
+        count = sum(1 for pid in selectable() if picked(pid))
+        pick_text.set('수집할 프로젝트를 체크하세요 · {}/{}개 선택'.format(count, len(selectable())))
+
+    def set_picked(ids):
+        ids = set(ids) & set(selectable())
+        state['selected'] = None if ids == set(selectable()) else ids
+        state['retry_source'] = state['retry_source'] if ids else None
+        refresh_summary()
+        fill_tree()
+
+    def toggle_project(event=None):
+        if state['running']:
+            return
+        row = tree.identify_row(event.y) if event is not None and getattr(event, 'y', None) is not None else tree.focus()
+        if not row or row not in selectable():
+            return
+        current = set(selectable()) if state['selected'] is None else set(state['selected'])
+        current ^= {row}
+        set_picked(current)
+        tree.focus(row)
+        tree.selection_set(row)
+    tree.bind('<ButtonRelease-1>', toggle_project)
+    tree.bind('<space>', toggle_project)
+    pick_none = ttk.Button(pick_bar, text='전체 해제', command=lambda: set_picked([]), width=RUN_WIDTH)
+    pick_none.pack(side='right')
+    pick_all = ttk.Button(pick_bar, text='전체 선택', command=lambda: set_picked(selectable()), width=RUN_WIDTH)
+    pick_all.pack(side='right', padx=(0, 8))
+    controls.extend([pick_all, pick_none])
 
     def go(step):
         step = max(0, min(len(STEPS) - 1, step))
@@ -472,6 +630,10 @@ def launch(run_loop=True):
             messagebox.showerror('폴더 확인', str(exc), parent=window)
             return None
         state['entries'] = entries
+        if state['selected'] is not None:
+            # Ticks survive a re-scan for the projects that are still there.
+            keep = set(state['selected']) & set(selectable())
+            state['selected'] = None if (state['selected'] and not keep) or keep == set(selectable()) else keep
         valid = sum(1 for e in entries if e.get('status') == 'pending')
         excluded = len(entries) - valid
         folder_message.set('프로젝트 {}개 확인됨{}'.format(valid, ' · 읽지 못한 파일 {}개는 제외'.format(excluded) if excluded else ''))
@@ -486,38 +648,29 @@ def launch(run_loop=True):
         return root, destination
 
     def check_duplicates(root):
-        """Warn before the run when GNS3's default folder holds the same projects (same ID)."""
+        """Tell before the run which projects share a GNS3 ID and will be collected through a temporary copy."""
         found = settings.duplicate_projects(root, state['entries'])
-        state['duplicates'] = found
-        if not found:
+        inside = [e for e in state['entries'] if e.get('status') == 'pending' and e.get('source_project_id')]
+        state['duplicates'] = found + [{'file': e['file'], 'project_id': e['project_id']} for e in inside]
+        if not state['duplicates']:
             return True
-        default = settings.project_default()
-        names = ', '.join(Path(item['file']).parent.name or item['file'] for item in found[:6]) + (' 외' if len(found) > 6 else '')
-        answer = messagebox.askyesnocancel('GNS3 기본 폴더와 겹치는 프로젝트', (
-            '선택한 폴더의 프로젝트 {}개가 GNS3 기본 프로젝트 폴더({})에도 같은 프로젝트(같은 ID)로 있습니다: {}\n\n'
-            'GNS3는 시작할 때 기본 폴더의 프로젝트를 등록하고 같은 ID는 하나만 열기 때문에, 이 프로젝트들은 선택한 폴더가 아니라 '
-            '기본 폴더의 사본으로 열립니다. TopoLog는 다른 폴더의 사본을 수집하지 않으므로 이 {}개는 수집하지 않습니다.\n\n'
-            '예: 프로젝트 폴더를 GNS3 기본 폴더로 바꾸기\n아니오: 이 폴더 그대로 진행(겹치는 프로젝트는 수집하지 않음)\n취소: 돌아가기'
-        ).format(len(found), default, names, len(found)), parent=window)
-        if answer is None:
-            return False
-        if answer:
-            projects.set(str(default))
-            again = scan()
-            if not again:
-                return False
-            state['duplicates'] = settings.duplicate_projects(again[0], state['entries'])
-            append('프로젝트 폴더를 GNS3 기본 폴더로 바꿨습니다: ' + str(default))
-        else:
-            append('GNS3 기본 폴더와 겹치는 프로젝트 {}개는 수집하지 않습니다: {}'.format(len(found), names))
-        return True
+        label = {e['file']: e.get('name') or Path(e['file']).stem for e in state['entries']}
+        names = ', '.join(label.get(item['file'], item['file']) for item in state['duplicates'][:6]) + (' 외' if len(state['duplicates']) > 6 else '')
+        ok = messagebox.askokcancel('같은 GNS3 ID를 쓰는 프로젝트', (
+            '프로젝트 {}개가 다른 프로젝트와 같은 GNS3 프로젝트 ID를 씁니다(폴더를 복사해 만든 프로젝트는 구성을 바꿔도 ID가 같습니다): {}\n\n'
+            'GNS3는 한 ID에 프로젝트 하나만 열기 때문에, TopoLog는 이 프로젝트들을 결과 폴더 옆 임시 폴더에 복사하고 사본에만 새 ID를 붙여 수집합니다. '
+            '원본 프로젝트 파일은 바꾸지 않고, 사본은 수집이 끝나면 지웁니다. 장비 디스크까지 복사하므로 시간이 더 걸리고 디스크 공간이 필요합니다.\n\n'
+            '확인: 이대로 진행\n취소: 돌아가기').format(len(state['duplicates']), names), parent=window)
+        if ok:
+            append('같은 GNS3 ID를 쓰는 프로젝트 {}개는 임시 사본으로 수집합니다: {}'.format(len(state['duplicates']), names))
+        return bool(ok)
 
     # ---------- run-screen actions ----------
     def choose_projects(retry=False):
         selected = scan()
         if not selected:
             return
-        from .selection import choose, retry_ids
+        from .selection import retry_ids
         previous = None
         initial = state['selected']
         if retry:
@@ -529,13 +682,16 @@ def launch(run_loop=True):
             except (OSError, ValueError) as exc:
                 messagebox.showerror('재수집', str(exc), parent=window)
                 return
-        ids = choose(window, state['entries'], initial)
-        if ids:
-            state['selected'] = ids
-            state['retry_source'] = previous
-            status.set('선택한 프로젝트 {}개를 새로 수집합니다.'.format(len(ids)))
-            refresh_summary()
-            fill_tree()
+        if not retry:
+            return
+        ids = set(initial) & set(selectable())
+        if not ids:
+            messagebox.showinfo('재수집', '선택한 결과에 다시 수집할 프로젝트가 없거나, 현재 프로젝트 폴더에 그 프로젝트가 없습니다.', parent=window)
+            return
+        state['retry_source'] = previous
+        set_picked(ids)
+        go(len(STEPS) - 1)
+        status.set('이전 결과에서 다시 수집할 프로젝트 {}개를 체크했습니다. 목록에서 바꿀 수 있습니다.'.format(len(ids)))
 
     def regenerate():
         folder = filedialog.askdirectory(parent=window, title='보고서를 다시 만들 결과 폴더')
@@ -547,6 +703,7 @@ def launch(run_loop=True):
             append('보고서 다시 만들기: {} · {}'.format(folder, scope_label()))
         except (OSError, ValueError) as exc:
             messagebox.showerror('보고서', str(exc), parent=window)
+            report_error('보고서 다시 만들기 실패: {}: {}'.format(type(exc).__name__, exc))
 
     def edit_titles(after=None):
         from .resultdir import is_result, top
@@ -564,6 +721,7 @@ def launch(run_loop=True):
             editor = open_editor(window, folder, on_done=lambda report: append('주석 제목 저장·보고서 갱신: ' + str(folder)))
         except (OSError, ValueError) as exc:
             messagebox.showerror('GNS3 사진 주석', str(exc), parent=window)
+            report_error('사진 제목 정리 창 열기 실패: {}: {}'.format(type(exc).__name__, exc))
             return
         state['title_editor'] = editor
         if after:
@@ -643,7 +801,7 @@ def launch(run_loop=True):
             configured = load_rules(rules.get() or None)
             root, destination = selected
             settings.save(root, destination, capture_screenshot=capture.get(), allow_enable=allow_enable.get(),
-                          detail_scope=detail_scope.get(), annotate=annotate_photo.get())
+                          detail_scope=detail_scope.get())
         except Exception as exc:
             messagebox.showerror('기대값 확인', str(exc), parent=window)
             return
@@ -656,9 +814,9 @@ def launch(run_loop=True):
         ids = None if state['selected'] is None else set(state['selected'])
         retry_source = state['retry_source']
         folder = new_output(destination)
-        enable, shoot, scope, mark = allow_enable.get(), capture.get(), detail_scope.get(), annotate_photo.get()
+        enable, shoot, scope = allow_enable.get(), capture.get(), detail_scope.get()
+        state['run_root'] = root
         password = (default_password.get() or None) if enable else None
-        fill_tree()
 
         def collect():
             _, found = discover(root)
@@ -676,9 +834,10 @@ def launch(run_loop=True):
             result = Runner(api, folder, configured, cancel=cancellation, progress=notify, enable=enable, enable_password=password,
                             password_provider=request_password, capture=shoot, project_ids=ids, retry_source=retry_source,
                             progress_state=lambda event: events.put(('progress', event)), detail_scope=scope, pause=gate,
-                            annotate=mark).run(root)
+                            annotate=True).run(root)
             return folder, result
         start_worker(collect, '수집 중입니다. 중지하면 장비 상태를 복구하고 그때까지의 결과를 보존합니다.')
+        fill_tree()
         show_log()
 
     def reassess_saved():
@@ -716,16 +875,16 @@ def launch(run_loop=True):
             status.set('현재 작업이 끝나는 지점에서 일시중지합니다. 진행 중인 명령·저장 창은 끝까지 마칩니다.')
             append('일시중지 요청')
 
-    start_button = ttk.Button(run_bar, text='수집 시작', style='Accent.TButton', command=run)
+    start_button = ttk.Button(run_bar, text='수집 시작', style='Accent.TButton', command=run, width=RUN_WIDTH)
     start_button.pack(side='left')
-    pause_button = ttk.Button(run_bar, text='일시중지', command=toggle_pause, state='disabled')
+    pause_button = ttk.Button(run_bar, text='일시중지', command=toggle_pause, state='disabled', width=RUN_WIDTH)
     pause_button.pack(side='left', padx=(8, 0))
-    stop = ttk.Button(run_bar, text='중지', command=request_stop, state='disabled')
+    stop = ttk.Button(run_bar, text='중지', command=request_stop, state='disabled', width=RUN_WIDTH)
     stop.pack(side='left', padx=(8, 0))
     side_bar.pack(side='right')
-    change = ttk.Button(nav, text='설정 변경', command=lambda: go(0))
+    change = ttk.Button(nav, text='설정 변경', command=lambda: go(0), width=NAV_WIDTH)
     change.pack(side='left', padx=(8, 0))
-    tools_button = ttk.Menubutton(nav, text='도구')
+    tools_button = ttk.Menubutton(nav, text='도구', width=NAV_WIDTH - 2)
     tools_menu = tk.Menu(tools_button, tearoff=False)
     tools_button['menu'] = tools_menu
     tools_button.pack(side='left', padx=(8, 0))
@@ -745,18 +904,40 @@ def launch(run_loop=True):
     def open_folder():
         if state['result'] and os.name == 'nt':
             os.startfile(str(state['result']))
-    folder_button = ttk.Button(side_bar, text='결과 폴더', command=open_folder)
+    folder_button = ttk.Button(side_bar, text='결과 폴더', command=open_folder, width=RUN_WIDTH)
     folder_button.pack(side='left', padx=(8, 0))
-    result_button = ttk.Button(side_bar, text='보고서 열기', command=open_result, state='normal' if state['result'] else 'disabled')
+    result_button = ttk.Button(side_bar, text='보고서 열기', command=open_result, state='normal' if state['result'] else 'disabled', width=RUN_WIDTH)
     result_button.pack(side='left', padx=(8, 0))
     # Picture titles belong with the result, not with the maintenance tools.
-    titles_button = ttk.Button(side_bar, text='사진 제목 정리', command=edit_titles, state='normal' if state['result'] else 'disabled')
+    titles_button = ttk.Button(side_bar, text='사진 제목 정리', command=edit_titles, state='normal' if state['result'] else 'disabled', width=RUN_WIDTH + 2)
     titles_button.pack(side='left', padx=(8, 0))
     actions['titles'] = titles_button
+    # Enabled only when the last run left GNS3 pictures unsaved; not part of `controls` so a run's end does not enable it.
+    # Sits above the project list, next to its 'GNS3 사진' column.
+    retake_button = ttk.Button(pick_bar, text='사진 다시 저장', command=lambda: retake(), state='disabled', width=RUN_WIDTH + 2)
+    retake_button.pack(side='right', padx=(0, 8))
+    actions['retake'] = retake_button
+
+    def retake():
+        """Open the projects whose GNS3 picture was not saved and save the pictures again; rebuilds that result."""
+        folder = state['result']
+        root = state.get('run_root') or projects.get()
+        if not folder or state['running']:
+            return
+        from .engine import retake_pictures
+
+        def operation():
+            preflight.prepare(API, True, progress=notify, cancel=cancellation, needs_vm=False)
+            api = connect(progress=notify, cancel=cancellation)
+            return folder, retake_pictures(api, folder, root, progress=notify, cancel=cancellation,
+                                           progress_state=lambda event: events.put(('progress', event)))
+        state['retaking'] = True
+        retake_button.configure(state='disabled')
+        start_worker(operation, 'GNS3 사진을 다시 저장합니다. 저장 창이 닫힐 때까지 GNS3 창을 조작하지 마세요.', pausable=False)
 
     # Secondary tools keep every earlier feature, out of the main path.
     hidden = ttk.Frame(window)
-    for key, label, command in [('scan', '프로젝트 다시 확인', scan), ('select', '수집할 프로젝트 선택', choose_projects),
+    for key, label, command in [('scan', '프로젝트 다시 확인', scan),
                                 ('retry', '이전 결과에서 재수집 대상 고르기', lambda: choose_projects(True)),
                                 ('rules', '기대값 파일 선택', select_rules), ('edit', '기대값 편집', edit_criteria),
                                 ('reassess', '기존 결과 다시 정리', reassess_saved), ('regenerate', '보고서 다시 만들기(현재 범위)', regenerate),
@@ -768,6 +949,7 @@ def launch(run_loop=True):
     tools_menu.add_separator()
     tools_menu.add_command(label='상세 기록 보기', command=show_log)
     tools_menu.add_command(label='기록 폴더 열기', command=open_log_folder)
+    tools_menu.add_command(label='피드백 보내기', command=lambda: report_error(feedback=True))
     actions.update(run=start_button, pause=pause_button, next=forward, back=back)
     controls.extend([start_button, change, tools_button])
 
@@ -829,7 +1011,6 @@ def launch(run_loop=True):
         for widget in controls:
             widget.configure(state='normal')
         sync_password()
-        sync_marker()
         stop.configure(state='disabled')
         pause_button.configure(state='disabled', text='일시중지')
         back.configure(state='normal')
@@ -861,8 +1042,26 @@ def launch(run_loop=True):
         else:
             status.set('실행 오류 · 상세 기록에서 원인을 확인하세요.')
             append('실행 오류: ' + str(value))
+            state['last_error'] = str(value)
+            if not state['closing']:
+                # Only opens the window; nothing is sent until the person agrees and presses send.
+                report_error(str(value))
         result_button.configure(state='normal' if state['result'] else 'disabled')
         titles_button.configure(state='normal' if state['result'] else 'disabled')
+        for pid in selectable():
+            if tree.exists(pid):
+                tree.item(pid, image=window._topolog_check_images[1 if picked(pid) else 0])
+        from .engine import failed_pictures
+        missing = failed_pictures(value[1]) if kind == 'done' else []
+        retake_button.configure(state='normal' if missing and state['result'] else 'disabled')
+        retaken = state.pop('retaking', False)
+        if kind == 'done' and not value[2] and not state['closing'] and missing and not retaken:
+            names = ', '.join(p.get('name', '') for p in missing[:8]) + (' 외' if len(missing) > 8 else '')
+            if messagebox.askyesno('GNS3 사진 다시 저장', 'GNS3 사진 {}개를 저장하지 못했습니다: {}\n\n지금 다시 저장할까요? 해당 프로젝트를 다시 열고 '
+                                   '이번 실행에서 켰던 장비를 잠시 켠 뒤 사진만 저장합니다. 수집한 설정과 출력은 바뀌지 않습니다.\n\n'
+                                   '아니요를 누르면 나중에 \'사진 다시 저장\' 버튼으로 할 수 있습니다.'.format(len(missing), names), parent=window):
+                retake()
+                return
         if kind == 'done' and not value[2] and not state['closing']:
             # Titles are chosen after the pictures exist: open the title editor first, the report after it closes.
             if marked_count(value[1]) and edit_titles(after=lambda: state['closing'] or open_result()):
@@ -914,6 +1113,10 @@ def launch(run_loop=True):
                 notice.pack_forget()
         window.after(100, poll)
 
+    from . import motw
+    unblocked = motw.describe(motw.unblock())
+    if unblocked:
+        append(unblocked)
     if defaults.get('migrated_auto_start'):
         append('이전 설정의 GNS3 자동 실행 끄기는 더 이상 쓰지 않습니다. GNS3와 연동 VM은 필요할 때 자동으로 실행됩니다.')
     sync_password()
@@ -923,10 +1126,11 @@ def launch(run_loop=True):
     window._topolog = {'projects': projects, 'output': output, 'rules': rules, 'status': status, 'actions': actions,
                        'state': state, 'stop': stop, 'result': result_button, 'events': events, 'cancel': cancellation,
                        'edit': edit_criteria, 'close': close, 'default_password': default_password, 'allow_enable': allow_enable,
-                       'capture': capture, 'annotate': annotate_photo, 'detail_scope': detail_scope, 'bring_to_front': bring_to_front, 'tracker': tracker,
+                       'capture': capture, 'retake': retake, 'detail_scope': detail_scope, 'bring_to_front': bring_to_front, 'tracker': tracker,
                        'progress_bar': progress_bar, 'progress_text': progress_text, 'percent': percent, 'tree': tree,
                        'go': go, 'pages': pages, 'gate': gate, 'notice': notice_text, 'outcome': outcome_text,
-                       'summary': summary_values, 'show_log': show_log, 'folder_message': folder_message}
+                       'summary': summary_values, 'show_log': show_log, 'folder_message': folder_message,
+                       'pick_text': pick_text, 'report_error': report_error, 'pick_all': pick_all, 'pick_none': pick_none, 'toggle_project': toggle_project}
     if run_loop:
         window.mainloop()
     return window

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from topolog.resultdir import records as R  # noqa: E402
+from topolog.resultdir import evidence_dir as E  # noqa: E402
 from topolog.engine import collect_node, Runner, load_rules, verdict
 from topolog.criteria import CriteriaDocument, make_rule, reassess
 from topolog.transport import Console
@@ -112,7 +113,7 @@ class RecoveryTests(unittest.TestCase):
             nodes = result['projects'][0]['nodes']
             self.assertEqual([n['collection'] for n in nodes], ['cancelled', 'not_run'])
             for node in nodes:
-                saved = json.loads((R(output) / P / node['node_id'] / 'collection.json').read_text())
+                saved = json.loads((E(output, P, node['node_id']) / 'collection.json').read_text())
                 self.assertEqual(saved, node)
 
 

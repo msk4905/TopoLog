@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from topolog.resultdir import records as R  # noqa: E402
+from topolog.resultdir import evidence_dir as E  # noqa: E402
 from topolog import annotate, gallery
 
 PID = '00000000-0000-0000-0000-0000000000a1'
@@ -258,7 +259,7 @@ class BuildTests(unittest.TestCase):
             report = Runner(FakeAPI(), self.root / 'out', collector=collected, settle_seconds=0, capture=True).run(labs)
         annotated = report['projects'][0]['topology_images']['annotated']
         self.assertIn(annotated['status'], ('generated', 'skipped'))
-        self.assertTrue((R(self.root / 'out') / P / annotate.RECORD).is_file())
+        self.assertTrue((E(self.root / 'out', P) / annotate.RECORD).is_file())
         with patch('topolog.topology.capture_native', side_effect=capture), patch('topolog.reach.run', return_value={}):
             report = Runner(FakeAPI(), self.root / 'out2', collector=collected, settle_seconds=0, capture=True,
                             annotate=False).run(labs)

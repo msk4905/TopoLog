@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 from xml.sax.saxutils import escape
+from .motw import PROCESS_POLICY
 
 
 def reconstruct(topology, destination):
@@ -48,21 +49,21 @@ def explain(detail,metadata=None):
 def capture_native(name, project_file, destination, cancel=None):
     destination=Path(destination)
     result={'status':'unavailable','kind':'gns3_native_topology_screenshot'}
-    if os.name!='nt':return {**result,'reason':'GNS3 GUI 스크린샷은 Windows 환경에서 지원합니다.'}
+    if os.name!='nt':return {**result,'reason':'GNS3 GUI 스크린샷은 Windows 환경에서 지원합니다.','retryable':False}
     try:
         if cancel and cancel.is_set():raise InterruptedError('Screenshot cancelled')
         from .security import safe_argument
         try:name=safe_argument(name)
         except ValueError:
             # A leading '-' or quote could be bound by PowerShell as another parameter.
-            return {**result,'reason':'프로젝트 이름에 캡처 스크립트로 전달할 수 없는 문자(앞의 -, 따옴표, 제어 문자)가 있어 GNS3 자체 캡처를 건너뛰었습니다.'}
+            return {**result,'reason':'프로젝트 이름에 캡처 스크립트로 전달할 수 없는 문자(앞의 -, 따옴표, 제어 문자)가 있어 GNS3 자체 캡처를 건너뛰었습니다.','retryable':False}
         from .resources import tool_directory
         script=tool_directory()/'capture-gns3.ps1'
         from . import winfocus
         restore_target = winfocus.capture_target()
         restore_args = (['-RestoreWindowHandle', str(restore_target['handle']),
                          '-RestoreWindowProcessId', str(restore_target['pid'])] if restore_target else [])
-        completed=subprocess.run(['powershell.exe','-NoLogo','-NoProfile','-NonInteractive','-File',str(script),
+        completed=subprocess.run(['powershell.exe','-NoLogo','-NoProfile','-NonInteractive',*PROCESS_POLICY,'-File',str(script),
                                   '-ProjectName',name,'-ProjectFile',str(Path(project_file).resolve()),
                                   '-Method','Native','-OutputDirectory',str(destination.resolve())] + restore_args,
                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=240,

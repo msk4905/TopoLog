@@ -47,7 +47,8 @@ def create(source,output):
     report['sharing']={'status':'manual_review_required','source_summary_sha256':hashlib.sha256(data).hexdigest(),
                        'warning':'공개 검토용 사본입니다. 이미지·주소·이름·사용자 정의 비밀 값은 직접 확인해야 합니다. 원본 증거/해시와 다른 편집 자료입니다.'}
     for project in report.get('projects',[]):
-        pid=project.get('project_id');base=safe(source_data,str(pid));dest=safe(inner,str(pid));dest.mkdir(exist_ok=True)
+        from .resultdir import project_dir,node_dir
+        base=safe(source_data,project_dir(project));dest=safe(inner,project_dir(project));dest.mkdir(exist_ok=True)
         for filename in ['topology.json','topology-reconstructed.svg']:
             p=safe(base,filename)
             if p.is_file():
@@ -65,16 +66,16 @@ def create(source,output):
                 item['sha256']=hashlib.sha256(d.read_bytes()).hexdigest()
             else:item.update(status='unavailable',reason='원본 이미지 파일이 없습니다.')
         for node in project.get('nodes',[]):
-            nd=safe(dest,str(node['node_id']));nd.mkdir(exist_ok=True)
+            nd=safe(dest,node_dir(node));nd.mkdir(exist_ok=True)
             for cmd in node.get('commands',[]):
                 if cmd.get('file'):
                     if 'text' not in cmd:
-                        original_command=safe(safe(base,str(node['node_id'])),cmd['file'])
+                        original_command=safe(safe(base,node_dir(node)),cmd['file'])
                         if not original_command.is_file():raise ValueError('원문 증거가 없는 명령은 공개 사본으로 만들 수 없습니다.')
                         cmd['text']=redact(original_command.read_text(encoding='utf-8',errors='replace'))
                     safe(nd,cmd['file']).write_text(cmd['text'],encoding='utf-8')
             startup=node.get('startup_configuration',{})
-            original=safe(safe(base,str(node['node_id'])),startup.get('file','startup.cfg'))
+            original=safe(safe(base,node_dir(node)),startup.get('file','startup.cfg'))
             if startup.get('status')=='collected' and original.is_file():safe(nd,startup.get('file','startup.cfg')).write_text(redact(original.read_text(encoding='utf-8',errors='replace')),encoding='utf-8')
             save(nd/'collection.json',node)
         save(dest/'result.json',project)

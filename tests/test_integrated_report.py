@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 from topolog.resultdir import records as R  # noqa: E402
+from topolog.resultdir import evidence_dir as E  # noqa: E402
 from topolog import services
 from topolog.topology import reconstruct,capture_native
 from topolog.reporting import render
@@ -29,8 +30,8 @@ class IntegratedTests(unittest.TestCase):
             with patch('topolog.topology.capture_native',side_effect=native):
                 result=Runner(API(),root/'out',collector=collected,settle_seconds=0,capture=True).run(labs)
             self.assertEqual(result['projects'][0]['status'],'completed')
-            self.assertTrue((R(root/'out')/P/'topology-reconstructed.svg').is_file())
-            self.assertTrue((R(root/'out')/P/M/'switch-ports.json').is_file())
+            self.assertTrue((E(root/'out',P)/'topology-reconstructed.svg').is_file())
+            self.assertTrue((E(root/'out',P,M)/'switch-ports.json').is_file())
             switch=next(n for n in result['projects'][0]['nodes'] if n['node_id']==M)
             self.assertEqual(switch['collection'],'collected')
             self.assertEqual(result['projects'][0]['verdict'],'passed')
@@ -41,7 +42,7 @@ class IntegratedTests(unittest.TestCase):
             self.assertFalse((root/'out'/'report-document-error.txt').exists())
             from urllib.parse import quote
             self.assertIn(quote(next((root/'out').glob('report(*).docx')).name),html)
-            self.assertIn(P+'/capture/gns3-topology.png',html)
+            self.assertIn('lab/capture/gns3-topology.png',html)
 
     def test_native_success_requires_exporter_record_and_png(self):
         import os

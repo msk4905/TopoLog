@@ -32,6 +32,13 @@ def link(path, label, download=False):
     return '<a '+('download ' if download else '')+'href="./'+quote(path, safe='/')+'">'+esc(label)+'</a>'
 
 
+def running_config(node):
+    """Evidence file of the device's collected running configuration, or None."""
+    item = next((c for c in reversed(node.get('commands', [])) if c.get('command') in ('show running-config', 'show run')
+                 and c.get('status') == 'collected' and c.get('file')), None)
+    return str(item['file']) if item else None
+
+
 def folder_link(path, label):
     """Link that opens a folder of the result in the browser's file view (no download attribute)."""
     path=str(path).strip('/')
@@ -42,22 +49,59 @@ def folder_link(path, label):
 
 
 def expectation(rule):
+    """What was checked, as a sentence, with the command whose output it was read from."""
+    text = _expectation(rule or {})
+    command = (rule or {}).get('command')
+    return text + (' (' + command + ')' if command and command not in text else '')
+
+
+def _expectation(rule):
     kind = rule.get('kind')
-    if kind=='interface_address': return rule.get('interface','')+' · '+rule.get('address','')
+    get = lambda key, default='': str(rule.get(key) if rule.get(key) is not None else default)
+    if kind=='interface_address': return get('interface')+' 인터페이스 주소 '+get('address')+' 확인'
+    if kind=='interface_up': return get('interface')+' 인터페이스 상태 up/up 확인'
+    if kind=='ipv6_address': return get('interface')+' 인터페이스 IPv6 주소 '+get('address')+' 확인'
     if kind=='ospf_neighbors': return 'OSPF 이웃 FULL: '+', '.join(rule.get('neighbors',[]))
-    if kind=='route': return '경로 '+rule.get('prefix','')+' · '+rule.get('protocol','')+(' · next hop '+rule['next_hop'] if rule.get('next_hop') else '')
-    if kind=='ping': return 'Ping '+rule.get('target','')+' · 응답 확인'
-    if kind=='vlan_active': return 'VLAN '+str(rule.get('vlan',''))+' 활성'
-    if kind=='trunk': return rule.get('interface','')+' · trunking'
-    if kind=='hsrp': return rule.get('interface','')+' · HSRP '+str(rule.get('group',''))+' · '+rule.get('virtual_ip','')
-    if kind=='dhcp_pool': return 'DHCP 풀 '+rule.get('pool','')+' · '+rule.get('network','')
-    if kind=='static_nat': return '정적 NAT '+rule.get('local','')+' → '+rule.get('global','')
-    if kind=='acl_binding': return rule.get('interface','')+' · ACL '+rule.get('acl','')+' · '+{'in':'수신','out':'송신'}.get(rule.get('direction'),'')
-    if kind=='stp_instance': return 'VLAN '+str(rule.get('vlan',''))+' · STP 인스턴스 활성'
-    if kind=='contains': return rule.get('command','')+' · '+', '.join(rule.get('expected',[]))
-    # Internal linkage keys (node ids, scope notes) are kept in JSON, not in the readable text.
-    shown={k:v for k,v in rule.items() if k not in INTERNAL_RULE_KEYS} if rule else {}
-    return json.dumps(shown,ensure_ascii=False) if shown else '수집 내용'
+    if kind=='route': return '경로 '+get('prefix')+' · '+get('protocol')+(' · next hop '+rule['next_hop'] if rule.get('next_hop') else '')
+    if kind=='static_route': return '정적 경로 '+get('prefix')+(' → '+get('via') if rule.get('via') else '')+' 확인'
+    if kind in ('route_covered','route6_covered'):
+        where=' ('+get('origin')+')' if rule.get('origin') else ''
+        return ('IPv6 ' if kind=='route6_covered' else '')+'목적지 '+get('address')+where+'로 가는 경로 확인'
+    if kind=='ping':
+        source=' · 출발 주소 '+get('source') if rule.get('source') else ''
+        where=get('destination')+' ' if rule.get('destination') else ''
+        return where+get('target')+'로 ping 응답 확인'+source
+    if kind=='eigrp_neighbor': return 'EIGRP 이웃 '+get('address')+(' ('+get('peer')+')' if rule.get('peer') else '')+' 확인'
+    if kind=='isis_neighbor': return 'IS-IS 이웃 '+get('peer')+' Up 확인'
+    if kind=='ipv6_neighbor':
+        protocol='OSPFv3' if 'ospf' in get('command') else 'IPv6 EIGRP' if 'eigrp' in get('command') else 'IPv6'
+        return protocol+' 이웃 '+get('peer')+(' · '+get('interface') if rule.get('interface') else '')+' 확인'
+    if kind=='bgp_peer': return 'BGP 이웃 '+get('address')+' 연결(Established) 확인'
+    if kind=='redistribution': return get('source')+' 경로를 '+get('into')+'에 재분배하는지 확인'
+    if kind=='ssh_enabled': return 'SSH 활성 상태 확인'
+    if kind=='isakmp_sa': return '피어 '+get('peer')+'와 ISAKMP(IKE 1단계) SA 확인'
+    if kind=='ipsec_sa': return '피어 '+get('peer')+'와 IPsec(2단계) SA 확인'
+    if kind=='nat_interfaces': return 'NAT inside '+', '.join(rule.get('inside',[]))+' · outside '+', '.join(rule.get('outside',[]))+' 지정 확인'
+    if kind=='vtp_mode': return 'VTP 모드 '+get('mode')+' 확인'
+    if kind=='stp_root': return 'VLAN '+get('vlan')+(' STP Root Bridge 확인' if rule.get('root') else ' STP Root Priority '+get('priority')+' 확인')
+    if kind=='vpcs_ip': return 'VPCS 주소 '+get('address')+(' · 게이트웨이 '+get('gateway') if rule.get('gateway') else '')+' 확인'
+    if kind=='vlan_active': return 'VLAN '+get('vlan')+' 활성'
+    if kind=='trunk': return get('interface')+' · trunking'
+    if kind=='hsrp': return get('interface')+' · HSRP '+get('group')+' · '+get('virtual_ip')
+    if kind=='dhcp_pool': return 'DHCP 풀 '+get('pool')+' · '+get('network')
+    if kind=='static_nat': return '정적 NAT '+get('local')+' → '+get('global')
+    if kind=='acl_binding': return get('interface')+' · ACL '+get('acl')+' · '+{'in':'수신','out':'송신'}.get(rule.get('direction'),'')
+    if kind=='stp_instance': return 'VLAN '+get('vlan')+' · STP 인스턴스 활성'
+    if kind=='contains': return get('command')+' 출력에 '+', '.join(rule.get('expected',[]))+' 포함 확인'
+    if kind=='asa_packet':
+        return 'ASA packet-tracer {} {} {} → {}:{} · 예상 {}'.format(get('interface'), get('protocol'), get('source'),
+                                                              get('destination'), get('destination_port'),
+                                                              {'allow':'허용','drop':'차단'}.get(rule.get('expected_action'), get('expected_action')))
+    # Kinds without a sentence still read as text: their fields, never a JSON literal.
+    shown={k:v for k,v in rule.items() if k not in INTERNAL_RULE_KEYS+('kind','command')} if rule else {}
+    if not shown:
+        return get('command')+' 출력 확인' if rule.get('command') else '수집 내용'
+    return ' · '.join('{} {}'.format(k, ', '.join(map(str,v)) if isinstance(v,list) else v) for k,v in shown.items())
 
 
 INTERNAL_RULE_KEYS=('origin_node','origin_interface','conditional','policy_context','diagnostic_flow')
@@ -124,7 +168,7 @@ def render(report, files):
         out.append('<div class="note">기존 수집 자료 정리 · '+esc(report['assessment']['assessed_at'])+'<br>장비를 새로 실행한 결과가 아닙니다.</div>')
     from .naming import report_files
     names=report_files(report)
-    from .resultdir import prefix
+    from .resultdir import prefix, project_dir, node_dir, node_dir_of
     # Records (evidence, JSON, Markdown) sit one folder down; the report, Word file and pictures stay at the top.
     inner=prefix(report)
     word=names['word'] if names['word'] in files else 'report.docx'
@@ -150,8 +194,9 @@ def render(report, files):
     out.append('</tbody></table></div><h2>프로젝트별 상세</h2>')
     for index,p in enumerate(projects):
         out.append('<details class="project" id="project-'+str(index)+'" open><summary>'+esc(p.get('name',p.get('file','프로젝트')))+badge(p.get('status'))+'</summary><div class="project-body">')
-        if p.get('project_id') and any(f.startswith(inner+str(p['project_id'])+'/') for f in files):
-            out.append('<p class="small">'+folder_link(inner+str(p['project_id']),'📁 이 프로젝트의 수집 원문 폴더')+'</p>')
+        base=inner+project_dir(p)
+        if project_dir(p) and any(f.startswith(base+'/') for f in files):
+            out.append('<p class="small">'+folder_link(base,'📁 이 프로젝트의 수집 원문 폴더')+'</p>')
         images=p.get('topology_images',{})
         out.append('<div class="topology-tabs" role="group" aria-label="토폴로지 사진">')
         tabs=[('native','실제 GNS3 스크린샷',True),('reconstructed','재구성 토폴로지',False)]
@@ -159,7 +204,7 @@ def render(report, files):
         for key,label,selected in tabs:
             ident='topology-'+str(index)+'-'+key;item=images.get(key,{})
             out.append('<input class="tab-radio" type="radio" name="topology-'+str(index)+'" id="'+ident+'"'+(' checked' if selected else '')+'><label class="tab-label" for="'+ident+'">'+label+'</label><div class="tab-panel">')
-            file=item.get('file');path=inner+str(p.get('project_id',''))+'/'+str(file or '')
+            file=item.get('file');path=base+'/'+str(file or '')
             from .gallery import planned
             collected_copy=planned(report).get((p.get('project_id'),key))
             if file and collected_copy and collected_copy in set(files or []):path=collected_copy
@@ -169,6 +214,11 @@ def render(report, files):
             if file and item.get('status') in ('captured','generated') and '..' not in PurePosixPath(path).parts and ':' not in path:
                 out.append('<img class="topology-image" alt="'+label+'" src="./'+quote(path,safe='/')+'"><p>'+link(path,'사진 내려받기',True)+'</p>')
             else:out.append('<p class="muted">'+esc(item.get('reason','이 실행에는 이미지가 없습니다. 새 수집에서 생성합니다.'))+'</p>')
+            retry=item.get('retry') if key=='native' else None
+            if retry:
+                out.append('<p class="small">'+esc('첫 시도에서 저장하지 못해 수집이 끝난 뒤 다시 저장했습니다. 첫 시도 원인: '+(retry.get('first_reason') or '기록 없음'))+'</p>'
+                           if item.get('status')=='captured' else
+                           '<p class="small">'+esc('수집이 끝난 뒤 다시 시도했지만 저장하지 못했습니다.'+(' '+retry['reason'] if retry.get('reason') else ''))+'</p>')
             note={'native':'GNS3 자체 Screenshot 기능의 이미지입니다. 내용은 직접 확인하세요.',
                   'annotated':'GNS3 사진의 사본에 수집한 설정의 서브넷·cost와 제목을 TopoLog가 덧붙인 그림입니다. 원래 사진은 첫 번째 탭입니다.'}
             out.append('<p class="small">'+note.get(key,'API 좌표와 연결로 구성한 그림이며 실제 스크린샷과 구분합니다.')+'</p></div>')
@@ -176,10 +226,16 @@ def render(report, files):
         features=sorted({f for n in p.get('nodes',[]) for f in n.get('analysis',{}).get('features',[])})
         if features:out.append('<div class="chips">'+''.join('<span class="chip">'+esc(LABELS.get(f,f))+'</span>' for f in features)+'</div>')
         if p.get('gns3_project_name'):out.append('<p class="muted">'+esc('GNS3에 등록된 프로젝트 이름: '+p['gns3_project_name'])+'</p>')
+        copy=p.get('gns3_copy') or {}
+        if copy:
+            other=('GNS3 기본 프로젝트 폴더의 '+copy['other']) if copy.get('other') else '같은 폴더 안의 다른 프로젝트 파일'
+            out.append('<p class="note">'+esc('같은 GNS3 프로젝트 ID를 쓰는 프로젝트('+other+')가 있어, 원본 파일은 그대로 두고 임시 사본(새 ID)으로 열어 수집했습니다. '
+                       +('사본은 수집이 끝난 뒤 지웠습니다.' if copy.get('removed') else '사본을 지우지 못했을 수 있습니다: '+str(copy.get('path',''))))+'</p>')
         for reason in [p.get('reason'),p.get('recovery_hint')]+p.get('cleanup_errors',[]):
             if reason:out.append('<p class="error">'+esc(reason)+'</p>')
         for node in p.get('nodes',[]):
             checks=node.get('checks',[]);counts=Counter(c['status'] for c in checks)
+            here=base+'/'+node_dir(node)+'/'
             expanded = ' open' if node is p['nodes'][0] else ''
             switch=node.get('node_type') in ('ethernet_switch','ethernet_hub','cloud','nat','frame_relay_switch','atm_switch')
             detail=('기본 동작 스위치' if node.get('switch_profile')=='default' else 'GNS3 내장 스위치 · 포트 설정 있음' if node.get('switch_profile')=='configured' else ('GNS3 내장 노드 · '+str(node.get('platform') or '')) if node.get('switch_profile')=='builtin' else 'GNS3 내장 스위치') if switch else node.get('platform','unknown').upper()
@@ -187,15 +243,17 @@ def render(report, files):
             if switch:
                 if node.get('reason'):out.append('<p class="small">'+esc(node['reason'])+'</p>')
                 if node.get('evidence_file'):
-                    path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(node['evidence_file'])
+                    path=here+str(node['evidence_file'])
                     out.append('<p class="small">포트 설정(API): '+link(path,'보기')+' · '+link(path,'다운로드',True)+'</p>')
             for reason in ([] if switch else [node.get('reason')])+[node.get('recovery_hint')]+node.get('cleanup_errors',[]):
                 if reason:out.append('<p class="error">'+esc(reason)+'</p>')
             startup=node.get('startup_configuration',{})
             if startup:
-                path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(startup.get('file','startup.cfg'))
+                path=here+str(startup.get('file','startup.cfg'))
+                running=running_config(node)
                 out.append('<p class="small">저장 설정: '+(link(path,'startup.cfg 보기') if startup.get('status')=='collected' else '미수집')+
-                           ' · 출처 '+esc(startup.get('source','—'))+'</p>')
+                           ' · 출처 '+esc(startup.get('source','—'))+
+                           ' · 실행 중 설정: '+(link(here+running,'running-config 보기') if running else '미수집')+'</p>')
             if node.get('privilege'):
                 out.append('<p class="small">EXEC 권한 전환: '+('성공' if node['privilege'].get('elevated') else '실패')+
                            ' · 원래 권한 복원 '+esc(node['privilege'].get('restoration','변경 없음'))+'</p>')
@@ -206,15 +264,15 @@ def render(report, files):
                     actual='관련 설정·원문 참조' if check.get('status')=='unverified' else ping_observation(check) if isinstance(check.get('observed'),dict) and 'success_percent' in check['observed'] else observation(check['observed']) if 'observed' in check else check.get('reason','관측값은 근거 파일을 확인하세요.')
                     if check.get('classification') in SCOPE_NOTES and 'success_percent' not in (check.get('observed') if isinstance(check.get('observed'),dict) else {}):
                         actual+=' · '+check.get('reason','')
-                    evidence=check.get('evidence');path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(evidence)
-                    extra=''.join('<br>'+link(inner+str(p.get('project_id',''))+'/'+str(e['node_id'])+'/'+str(e['file']),e.get('label','ASA 근거'),True) for e in check.get('additional_evidence',[]))
-                    out.append('<tr><td>'+esc(expected)+''+'</td><td class="value">'+esc(actual)+'</td><td>'+(link(path,'보기')+' · '+link(path,'다운로드',True) if evidence else '—')+'</td></tr>')
+                    evidence=check.get('evidence');path=here+str(evidence)
+                    extra=''.join('<br>'+link(base+'/'+node_dir_of(p,e['node_id'])+'/'+str(e['file']),e.get('label','추가 근거')) for e in check.get('additional_evidence',[]) if e.get('node_id') and e.get('file'))
+                    out.append('<tr><td>'+esc(expected)+''+'</td><td class="value">'+esc(actual)+'</td><td>'+(link(path,'보기')+' · '+link(path,'다운로드',True) if evidence else '—')+extra+'</td></tr>')
                 out.append('</tbody></table></div>')
             out.append('<details class="raw"><summary>원본 명령과 상세 기록</summary><ul>')
             for command in node.get('commands',[]):
-                path=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/'+str(command.get('file',''))
+                path=here+str(command.get('file',''))
                 out.append('<li>'+link(path,command['command'])+' · '+link(path,'다운로드',True)+' '+badge(command.get('status'))+'</li>')
-            record=inner+str(p.get('project_id',''))+'/'+str(node.get('node_id',''))+'/collection.json'
+            record=here+'collection.json'
             out.append('</ul>'+link(record,'장비 상세 JSON')+'</details></div></details>')
         if not p.get('nodes'):out.append('<p class="muted">수집된 장비가 없습니다. 처리 상태와 오류 기록을 확인하세요.</p>')
         for missing in p.get('missing_rule_nodes',[]):out.append('<p class="error">기준 대상 장비 없음: '+esc(missing)+'</p>')

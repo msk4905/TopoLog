@@ -52,7 +52,7 @@ function Start-ActionWorker($Element,[string]$Stem) {
     [IO.File]::WriteAllText($request,([ordered]@{process_id=$Gns3ProcessId;runtime_id=($Element.GetRuntimeId() -join ',');result_path=$result;expand=($Stem -like 'file-menu-*')}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
     $start=[Diagnostics.ProcessStartInfo]::new()
     $start.FileName=Join-Path $PSHOME 'powershell.exe'
-    $start.Arguments='-NoLogo -NoProfile -NonInteractive -File "'+(Join-Path $PSScriptRoot 'invoke-gns3-action.ps1')+'" -RequestPath "'+$request+'"'
+    $start.Arguments='-NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "'+(Join-Path $PSScriptRoot 'invoke-gns3-action.ps1')+'" -RequestPath "'+$request+'"'
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true
     $process=[Diagnostics.Process]::Start($start)
     $script:workers+=$process
@@ -114,8 +114,16 @@ try {
     $record.phase='invoke_action'
     for($attempt=1;$attempt -le 3 -and -not $dialog;$attempt++) {
         Assert-IdleWindow
-        $root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
-        $candidates=@(Find-OpenActions $root)
+        # Right after the previous project closed, UI Automation can fail once with a generic COM error
+        # ('Unrecognized error'); that attempt is recorded and the search is repeated.
+        try {
+            $root=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+            $candidates=@(Find-OpenActions $root)
+        } catch {
+            $record['attempts']+=[ordered]@{attempt=$attempt;source='find open action';result=('failed: '+$_.Exception.GetBaseException().Message)}
+            Start-Sleep -Milliseconds 800
+            continue
+        }
         $visible=@($candidates | Where-Object {-not $_.offscreen})
         $note=[ordered]@{attempt=$attempt;window=(Get-WindowShape $root);candidates=@($candidates | ForEach-Object {[ordered]@{name=$_.name;type=$_.type;offscreen=$_.offscreen;rect=$_.rect}});source=$null;result=$null}
         foreach($menu in $script:fileMenus) {try {$collapse=$null;if($menu.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$collapse)){$collapse.Collapse()}} catch {}}
