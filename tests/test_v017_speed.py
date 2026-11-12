@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog.engine import Runner
 from test_batch import FakeAPI, collected, project, P, N, M
 from test_v015_outputs import png_bytes
@@ -217,7 +218,7 @@ class CaptureScriptTests(unittest.TestCase):
         from topolog.resources import tool_directory
         opener = (tool_directory() / 'open-gns3-project.ps1').read_text(encoding='utf-8-sig')
         export = (tool_directory() / 'export-gns3-screenshot.ps1').read_text(encoding='utf-8-sig')
-        for text in ('Invoke-ThroughFileMenu', 'IsOffscreen', "$attempt -le 3", 'window_at_start', "'attempts'", 'Assert-IdleWindow'):
+        for text in ('Invoke-ThroughFileMenu', 'IsOffscreen', "$attempt -le 4", 'window_at_start', "'attempts'", 'Assert-IdleWindow'):
             self.assertIn(text, opener)
         self.assertIn('offscreen_screenshot_actions', export)
         for forbidden in ('BlockInput', 'SendInput', 'keybd_event', 'SetWindowsHookEx', 'mouse_event'):

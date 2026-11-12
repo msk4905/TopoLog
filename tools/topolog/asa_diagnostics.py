@@ -126,6 +126,16 @@ def describe(record):
     parts=[]
     if record.get('deny_logs'):parts.append('동일 흐름 차단 로그 확인')
     labels={'allow':'통과','drop':'차단','unknown':'결과 확인 필요'}
+    request=record.get('request') or {}
+    if request.get('action')=='drop' and 'acl-drop' in request.get('drop_reason',''):
+        # The request itself is stopped by the ASA access rules: that is why no answer came back.
+        # A reply trace then has no request to belong to, so it is not reported.
+        parts.append('원인: ASA 접근 규칙(ACL)이 요청을 차단함(packet-tracer acl-drop)')
+        return ' · '.join(parts)+' · 의도한 정책인지는 실습 목적에 맞춰 확인하세요.'
     for key,label in (('request','요청'),('reply','응답')):
-        if key in record:parts.append('ASA '+label+' 모의 검사: '+labels[record[key]['action']])
+        if key not in record:continue
+        trace=record[key];reason=trace.get('drop_reason','')
+        if key=='reply' and trace['action']=='drop' and re.search(r'seq-num-not-matched|no-session|inspect-icmp',reason):
+            continue                      # a made-up reply without its request is always dropped; it tells nothing
+        parts.append('ASA '+label+' 모의 검사: '+labels[trace['action']])
     return ' · '.join(parts)+' · 실제 응답 및 의도한 정책의 정상 여부는 별도 확인이 필요합니다.'

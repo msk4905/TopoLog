@@ -30,7 +30,7 @@ class DiagnosticsTests(unittest.TestCase):
 
     def test_ping_reports_no_percent_and_preserve_result(self):
         rule={'kind':'ping','target':'1.1.1.1','min_percent':40}
-        for rate,status,label in [(40,'passed','ping 성공'),(0,'failed','응답 없음'),(20,'failed','확인 보류')]:
+        for rate,status,label in [(40,'passed','ping 성공'),(0,'failed','응답 없음'),(20,'failed','확인 필요')]:
             check=verify.evaluate(rule,[{'command':verify.ping_command(rule,'ios'),'file':'1.txt','status':'collected','text':f'Success rate is {rate} percent'}],{'platform':'ios'})
             self.assertEqual(check['status'],status)
             self.assertEqual(check['observed']['success_percent'],rate)
@@ -61,7 +61,7 @@ class DiagnosticsTests(unittest.TestCase):
             diagnostics.run(API(),entry,folder,lambda *a,**k:console,lambda x:None,None,True,None,None,[])
             check=verify.evaluate(rule,source['commands'],source)
             self.assertEqual(check['status'],'inconclusive')
-            self.assertIn('요청 모의 검사: 차단',check['reason'])
+            self.assertIn('ASA 접근 규칙(ACL)이 요청을 차단함',check['reason'])
             self.assertEqual(check['asa_diagnostic']['request']['action'],'drop')
             for evidence in check['additional_evidence']:self.assertTrue((folder/evidence['node_id']/evidence['file']).is_file())
         self.assertIn('terminal pager 23',console.sent)

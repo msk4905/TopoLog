@@ -10,6 +10,7 @@ import zlib
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog.resultdir import records as R  # noqa: E402
 from topolog.resultdir import evidence_dir as E  # noqa: E402
 from topolog import sharing, security, portfolio, topology

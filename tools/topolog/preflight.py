@@ -143,6 +143,10 @@ def _prepare(api_factory, launch, progress, cancel, gui_timeout, vm_timeout, nee
     if window_titles is None:
         from .winfocus import gns3_window_titles as window_titles
     record.update({'gui_running': is_running(), 'launched': False})
+    from . import winfocus
+    # Windows that are already open belong to the user; only windows that open during this preparation are minimized.
+    vmware_before = winfocus.program_windows(winfocus.VMWARE_PROGRAMS)
+    gns3_before = winfocus.program_windows(winfocus.GNS3_PROGRAMS)
     if record['gui_running'] is None:
         # Not Windows or process list unavailable: keep the previous behaviour.
         return record
@@ -215,11 +219,27 @@ def _prepare(api_factory, launch, progress, cancel, gui_timeout, vm_timeout, nee
             if needs_vm:
                 raise ValueError(message)
             progress('Preflight: ' + message + ' 이번 프로젝트는 VM 장비가 없어 계속 진행합니다.')
+    minimize_started(record, vmware_before, gns3_before)
     if record['launched']:
         # The fresh GUI shows its startup "Project" chooser; the screenshot step
         # closes it (cancel) before using the idle window.
         record['startup_dialog'] = 'closed by screenshot step when present'
     return record
+
+
+def minimize_started(record, vmware_before, gns3_before=None):
+    """Minimize the GNS3 and GNS3 server windows TopoLog started and a VMware window that appeared meanwhile.
+
+    Windows that were open before the preparation are left alone; VMware is left alone entirely when it was already open.
+    """
+    from . import winfocus
+    targets = set()
+    if record.get('launched'):
+        targets |= (winfocus.program_windows(winfocus.GNS3_PROGRAMS) or set()) - (gns3_before or set())
+    if vmware_before == set():
+        targets |= winfocus.program_windows(winfocus.VMWARE_PROGRAMS) or set()
+    if targets:
+        record['minimized_windows'] = winfocus.minimize(targets)
 
 
 def projects_need_vm(root, entries):

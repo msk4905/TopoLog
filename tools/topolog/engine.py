@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 import shutil
 import uuid
+from urllib.error import HTTPError
 import zipfile
 from urllib.error import HTTPError
 from datetime import datetime, timezone
@@ -238,6 +239,11 @@ def validate_rules(data):
             nid = guid(nid)
             if nid in normalized or not isinstance(node, dict) or not isinstance(node.get('checks', []), list):
                 raise ValueError('Invalid or duplicate node criteria')
+            disabled = node.get('disabled', [])
+            if not isinstance(disabled, list) or any(not isinstance(k, str) for k in disabled):
+                raise ValueError('Switched-off checks must be a list of check keys')
+            if any('replaces' in c and not isinstance(c['replaces'], str) for c in node.get('checks', []) if isinstance(c, dict)):
+                raise ValueError('Replaced check key must be text')
             if node.get('platform', 'auto') not in ('auto', 'ios', 'asa', 'vpcs'):
                 raise ValueError('Invalid node platform')
             for check in node.get('checks', []):
@@ -636,8 +642,10 @@ def collect_node(api, node, folder, spec, selected, ready_timeout=120, cancel=No
             if getattr(console, 'pager_resends', 0):
                 result['pager_key_resends'] = console.pager_resends
         if result['collection'] != 'not_applicable' and node['node_type'] not in BUILTIN_TYPES:
+            from .features import evaluate_user
             for check in spec.get('checks', []):
-                result['checks'].append({'criterion': check, **profiles.evaluate(check, result['commands'], result['platform'])})
+                clean = {k: v for k, v in check.items() if k != 'replaces'}
+                result['checks'].append({'criterion': clean, 'origin': 'user', **evaluate_user(clean, result)})
         if not result['checks']:
             result['checks'].append({'status': 'unverified', 'reason': 'No explicit expected behavior configured'})
         save(folder / 'collection.json', result)
@@ -647,11 +655,17 @@ def collect_node(api, node, folder, spec, selected, ready_timeout=120, cancel=No
 def verdict(nodes):
     # Built-in switches have no judged behaviour; they never block or create a pass.
     nodes = [n for n in nodes if n.get('node_type') not in BUILTIN_TYPES]
-    if any(c['status'] == 'failed' for n in nodes for c in n['checks']):
+    # A check the user switched off is shown but never judged.
+    judged = {id(n): [c for c in n['checks'] if c['status'] != 'excluded'] for n in nodes}
+    if any(c['status'] == 'failed' for n in nodes for c in judged[id(n)]):
         return 'failed'
-    if not nodes or any(n['collection'] != 'collected' or not n['checks'] or any(c['status'] != 'passed' for c in n['checks']) for n in nodes):
+    if not nodes or any(n['collection'] != 'collected' or not judged[id(n)] or any(c['status'] != 'passed' for c in judged[id(n)]) for n in nodes):
         return 'inconclusive'
     return 'passed'
+
+
+# Seconds between the server checks before a project is loaded.
+SERVER_CHECK_INTERVAL = 1.0
 
 
 class Runner:
@@ -756,12 +770,14 @@ class Runner:
                     continue
                 if before is None:
                     opened = True
-                    loaded = self.api.call('/v2/projects/load', 'POST', {'path': str(open_file(entry, root))})
+                    self._stable_server()
+                    loaded = self._load(entry, 'load', '/v2/projects/load', 'POST', {'path': str(open_file(entry, root))})
                     if loaded['project_id'] != pid:
                         raise ValueError('Loaded project identity differs from selected file')
                 elif before['status'] != 'opened':
                     opened = True
-                    self.api.call(prefix + '/open', 'POST')
+                    self._stable_server()
+                    self._load(entry, 'open', prefix + '/open', 'POST')
                 ran = {r['node_id'] for r in entry['nodes'] if r.get('collection') not in ('not_run', 'pending')}
                 for node in self.api.call(prefix + '/nodes'):
                     nid = node.get('node_id')
@@ -793,7 +809,7 @@ class Runner:
                         self.api.call(prefix + '/nodes/' + nid + '/stop', 'POST')
                     except Exception:
                         entry.setdefault('cleanup_errors', []).append('Could not stop ' + nid + ' after picture retry')
-                if opened:
+                if opened and not entry.pop('load_interrupted', False):
                     try:
                         self.api.call(prefix + '/close', 'POST')
                     except Exception:
@@ -820,6 +836,46 @@ class Runner:
         if self.pause is not None:
             self.pause.wait(self.cancel, where)
         self.check_cancel()
+
+    def _stable_server(self, checks=3, timeout=90):
+        """Wait until the GNS3 server answered `checks` times in a row, one second apart.
+
+        Loading a project while the server restarts can make GNS3 rewrite the project file half
+        loaded (a link lost its ends once). No project is loaded until the server is steady.
+        """
+        deadline = time.monotonic() + timeout
+        steady = 0
+        notified = False
+        while True:
+            self.check_cancel()
+            try:
+                self.api.call('/v2/version')
+                steady += 1
+            except HTTPError:
+                steady += 1                       # an HTTP answer still means the server is up
+            except OSError:
+                steady = 0                        # refused, reset or timed out: not reachable now
+                if not notified:
+                    self.progress('Preflight: GNS3 서버 응답이 안정될 때까지 기다린 뒤 프로젝트를 엽니다.')
+                    notified = True
+            except Exception:
+                steady += 1                       # an answer of another shape still came from the server
+            if steady >= checks:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError('GNS3 server did not stay reachable; the project was not opened')
+            if self.cancel.wait(SERVER_CHECK_INTERVAL):
+                raise InterruptedError('Collection cancelled while waiting for the GNS3 server')
+
+    def _load(self, entry, call, *args):
+        """A load/open request; a dropped connection marks the project so nothing else is sent to it."""
+        try:
+            return self.api.call(*args)
+        except OSError:
+            # The server went away in the middle of loading. Closing or stopping now would make
+            # GNS3 write the half-loaded project back to its file, so the project is left as it is.
+            entry['load_interrupted'] = True
+            raise
 
     def _use_copy(self, entry, root, registered):
         """Make the temporary copy of this project (raises ValueError when it cannot be made)."""
@@ -931,18 +987,21 @@ class Runner:
                         pid_api = entry['gns3_copy']['project_id']
                         prefix = '/v2/projects/' + pid_api
                         opened = True
-                        loaded = self.api.call('/v2/projects/load', 'POST', {'path': entry['gns3_copy']['path']})
+                        self._stable_server()
+                        loaded = self._load(entry, 'load', '/v2/projects/load', 'POST', {'path': entry['gns3_copy']['path']})
                         if loaded['project_id'] != pid_api:
                             raise ValueError('Loaded copy identity differs from the temporary copy')
                     elif before is None:
                         # Local controller must be able to access this file path.
                         opened = True
-                        loaded = self.api.call('/v2/projects/load', 'POST', {'path': str(root / entry['file'])})
+                        self._stable_server()
+                        loaded = self._load(entry, 'load', '/v2/projects/load', 'POST', {'path': str(root / entry['file'])})
                         if loaded['project_id'] != pid:
                             raise ValueError('Loaded project identity differs from selected file')
                     elif before['status'] != 'opened':
                         opened = True
-                        self.api.call(prefix + '/open', 'POST')
+                        self._stable_server()
+                        self._load(entry, 'open', prefix + '/open', 'POST')
                     nodes = self.api.call(prefix + '/nodes')
                     mark('prepare_project')
                     advance(project_index,.08,'장비 시작 · '+entry['name'],'장비 시작')
@@ -992,6 +1051,8 @@ class Runner:
                     from .progress import message
                     worker_api=LockedAPI(self.api)
                     finished_records={}
+                    advance(project_index,.15,'프로젝트 {}/{} · 장비 0/{} 완료 · 설정 수집 시작'.format(project_index+1,len(entries),len(nodes)),
+                        '장비 설정 수집 (0/{}대 완료)'.format(len(nodes)))
                     def collect_one(node):
                         nid=guid(node['node_id']);record=dict(records[nid])
                         if record['collection']=='pending':self.safe_point('장비 수집 전')
@@ -1125,6 +1186,12 @@ class Runner:
                                           checks=[{'status': 'unverified', 'reason': 'Collection not attempted'}])
                         node_folder = folder / node_dir(record)
                         save(node_folder / 'collection.json', record)
+                    if entry.get('load_interrupted'):
+                        # Nothing was started; closing a half-loaded project would save it over the file.
+                        opened = False
+                        entry['load_interrupted_note'] = ('GNS3 서버 연결이 프로젝트를 불러오는 도중 끊겼습니다. 프로젝트 파일을 보호하려고 '
+                                                          '닫기 요청을 보내지 않았습니다. GNS3에 이 프로젝트가 열려 있으면 저장하지 말고 닫아 주세요.')
+                        self.progress('Preflight: ' + entry['load_interrupted_note'])
                     remaining = list(reversed(started))
                     others = {r['node_id'] for r in entry['nodes']} - set(started)
                     if len(remaining) > 1 and not others:

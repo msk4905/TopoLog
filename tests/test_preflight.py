@@ -173,5 +173,30 @@ class PreflightTests(unittest.TestCase):
             self.assertIs(saved['allow_enable'], False)
             self.assertTrue(settings.load(file)['auto_start_gns3'])
 
+    def test_only_windows_opened_by_this_preparation_are_minimized(self):
+        from unittest.mock import patch
+        windows = {'gns3': set(), 'vmware': set()}
+
+        def listing(names):
+            return set(windows['gns3']) if 'gns3.exe' in names else set(windows['vmware'])
+
+        def launch(exe):
+            windows['gns3'] = {1, 4}                 # GNS3 and its local server console
+            windows['vmware'] = {2}                  # VMware opened by the GNS3 VM start
+        with patch('topolog.winfocus.program_windows', side_effect=listing), \
+                patch('topolog.winfocus.minimize', side_effect=lambda handles: len(handles)) as minimize:
+            preflight.prepare(lambda: API(), True, is_running=lambda: False, find_executable=lambda: Path('C:/GNS3/gns3.exe'),
+                              start=Mock(side_effect=launch), gui_timeout=10, vm_timeout=2, window_titles=lambda: ['GNS3'])
+            self.assertEqual(minimize.call_args.args[0], {1, 2, 4})
+
+            minimize.reset_mock()
+            windows.update(gns3={1}, vmware={2})      # both already open before TopoLog: left alone
+            preflight.prepare(lambda: API(), True, is_running=lambda: True, start=Mock())
+            minimize.assert_not_called()
+
+            windows.update(gns3={1}, vmware={3})      # user's own GNS3, VMware already open: left alone
+            preflight.prepare(lambda: API(), True, is_running=lambda: True, start=Mock())
+            minimize.assert_not_called()
+
 if __name__ == '__main__':
     unittest.main()

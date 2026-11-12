@@ -4,6 +4,7 @@ Detectors are composable. Unsupported intent stays explicitly unverified; raw
 configuration and all command evidence remain in the normal collection files.
 """
 import ipaddress
+import json
 import re
 from . import profiles
 
@@ -228,6 +229,54 @@ def plan_pings(project):
     return verify.derive(project, parsed, linked)[1]
 
 
+# Keys that depend on the run (source address, policy context, origin) and never identify a check.
+VOLATILE_KEYS = ('origin_node', 'origin_interface', 'conditional', 'policy_context', 'diagnostic_flow', 'source', 'replaces', 'policy')
+VERIFY_KINDS = profiles.EXTENDED_KINDS - {'vlan_active', 'trunk', 'hsrp', 'dhcp_pool', 'static_nat', 'acl_binding', 'stp_instance'}
+
+
+def rule_key(rule):
+    """Stable identity of a check rule, used to switch an automatic check off or replace it."""
+    return json.dumps({k: v for k, v in (rule or {}).items() if k not in VOLATILE_KEYS}, sort_keys=True, ensure_ascii=False)
+
+
+def evaluate_user(rule, node):
+    """A check the user added or changed, judged like the automatic one of the same kind."""
+    from . import verify
+    platform = node.get('platform', 'unknown')
+    try:
+        profiles.command_for(rule, platform)
+    except (ValueError, KeyError, TypeError) as exc:
+        return {'status': 'inconclusive', 'reason': '이 장비에서 확인할 수 없는 조건입니다: ' + str(exc)}
+    if rule['kind'] == 'ping' or rule['kind'] in VERIFY_KINDS:
+        return verify.evaluate(rule, node.get('commands', []), node)
+    if rule['kind'] not in profiles.EXTENDED_KINDS:
+        # Editor kinds of the earlier criteria files (route, OSPF neighbours, output text, ASA packet).
+        return profiles.evaluate(rule, node.get('commands', []), platform)
+    return evaluate(rule, node.get('commands', []), platform)
+
+
+def merge_checks(node, automatic, spec):
+    """Automatic checks with the user's choices applied: switched off, replaced by a changed copy, or added."""
+    spec = spec or {}
+    disabled = set(spec.get('disabled', []))
+    replaced = {c.get('replaces') for c in spec.get('checks', []) if c.get('replaces')}
+    result = []
+    for item in automatic:
+        key = rule_key(item['criterion']) if item.get('criterion') else None
+        if key and key in replaced:
+            result.append({'criterion': item['criterion'], 'status': 'excluded', 'origin': 'user', 'feature': item.get('feature'),
+                           'reason': '사용자가 값을 바꿨습니다. 바꾼 조건은 사용자 지정 항목으로 따로 확인합니다.'})
+        elif key and key in disabled:
+            result.append({'criterion': item['criterion'], 'status': 'excluded', 'origin': 'user', 'feature': item.get('feature'),
+                           'reason': '사용자가 확인에서 제외했습니다.'})
+        else:
+            result.append(item)
+    for rule in spec.get('checks', []):
+        clean = {k: v for k, v in rule.items() if k != 'replaces'}
+        result.append({'criterion': clean, 'origin': 'user', **evaluate_user(clean, node)})
+    return result
+
+
 def apply(project, specifications=None):
     from . import verify
     nodes = project.get('nodes',[]); specs = specifications or {}
@@ -317,15 +366,14 @@ def apply(project, specifications=None):
         if _ran_reachability(node):
             for rule in pings.get(node['node_id'],[]):
                 automatic.append({'criterion':rule,'origin':'configuration','feature':'reachability',
-                                  'basis':'라우팅 도메인으로 경로가 있어야 하는 원격 장비 주소로의 ping · 정책 차단 가능 시 판정 보류',
+                                  'basis':'라우팅 도메인으로 경로가 있어야 하는 원격 장비 주소로의 ping · 정책 차단 가능 시 확인 필요',
                                   **verify.qualify(verify.evaluate(rule,node.get('commands',[]),node),rule,states)})
         for feature in analysis['features']:
             if feature not in covered:
                 automatic.append({'status':'unverified','origin':'configuration','feature':feature,
                                   'reason':LABELS.get(feature,feature)+': 설정과 가능한 명령을 보존했으며 전체 기능·정책 기대값은 자동 확정하지 않았습니다.'})
         node['automatic_checks']=automatic
-        if not specs.get(node['node_id'],{}).get('checks'):
-            node['checks']=automatic or [{'status':'unverified','reason':'설정에서 자동 판정할 조건을 찾지 못했습니다.'}]
+        node['checks']=merge_checks(node,automatic,specs.get(node['node_id'])) or [{'status':'unverified','reason':'설정에서 자동 판정할 조건을 찾지 못했습니다.'}]
     project['detected_features']=sorted({feature for a in analyses.values() for feature in a['features']})
 
 
@@ -347,7 +395,8 @@ def _vpcs_and_ping(node, pings, specs, states=None):
         for rule in pings:
             automatic.append({'criterion':rule,'origin':'configuration','feature':'reachability','basis':'기본 게이트웨이와 원격 라우터 주소로의 ping',
                               **verify.qualify(verify.evaluate(rule,node.get('commands',[]),node),rule,states or {})})
-    if automatic:
+    if automatic or specs.get(node['node_id']):
         node['automatic_checks']=automatic
-        if not specs.get(node['node_id'],{}).get('checks'):node['checks']=automatic
+        merged=merge_checks(node,automatic,specs.get(node['node_id']))
+        if merged:node['checks']=merged
 

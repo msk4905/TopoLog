@@ -142,8 +142,10 @@ def reassess(source, output, criteria_path=None):
             node_spec = expected.get(node['node_id'], {})
             checks = node_spec.get('checks', [])
             mismatch = node_spec.get('platform', 'auto') not in ('auto', node.get('platform'))
-            node['checks'] = [{'criterion': check, **({'status': 'inconclusive', 'reason': 'Driver differs from recorded OS'}
-                             if mismatch else profiles.evaluate(check, node.get('commands', []), node.get('platform', 'unknown')))}
+            from .features import evaluate_user
+            node['checks'] = [{'criterion': {k: v for k, v in check.items() if k != 'replaces'}, 'origin': 'user',
+                               **({'status': 'inconclusive', 'reason': 'Driver differs from recorded OS'}
+                                  if mismatch else evaluate_user({k: v for k, v in check.items() if k != 'replaces'}, node))}
                               for check in checks]
             if not checks:
                 node['checks'] = [{'status': 'unverified', 'reason': 'No explicit expected behavior configured'}]

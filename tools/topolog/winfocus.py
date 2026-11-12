@@ -85,6 +85,49 @@ def gns3_window_titles():
         return None
 
 
+VMWARE_PROGRAMS = ('vmware.exe', 'vmplayer.exe')
+GNS3_PROGRAMS = ('gns3.exe', 'gns3server.exe')
+
+
+def program_windows(names):
+    """Handles of visible top-level windows owned by the named programs; None when this cannot be checked."""
+    if os.name != 'nt':
+        return None
+    try:
+        ctypes, wintypes, user32 = _user32()
+        found = set()
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def visit(hwnd, _):
+            if user32.IsWindowVisible(hwnd):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if _process_name(pid.value) in names:
+                    found.add(int(hwnd))
+            return True
+        user32.EnumWindows(callback_type(visit), 0)
+        return found
+    except Exception:
+        return None
+
+
+def minimize(handles):
+    """Minimize the given windows without activating anything; returns how many were minimized."""
+    if os.name != 'nt' or not handles:
+        return 0
+    try:
+        ctypes, wintypes, user32 = _user32()
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        done = 0
+        for handle in handles:
+            if user32.IsWindow(handle) and not user32.IsIconic(handle):
+                user32.ShowWindow(handle, 7)   # SW_SHOWMINNOACTIVE: minimized, focus stays where it is
+                done += 1
+        return done
+    except Exception:
+        return 0
+
+
 def snapshot():
     """{'handle','pid','exe'} of the current foreground window, or None off Windows."""
     if os.name != 'nt':

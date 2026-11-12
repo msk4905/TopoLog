@@ -12,6 +12,7 @@ from urllib.parse import unquote
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog.engine import Runner  # noqa: E402
 from topolog.resultdir import RECORDS, records, top  # noqa: E402
 from test_batch import FakeAPI, collected, project, P  # noqa: E402

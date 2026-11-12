@@ -62,8 +62,26 @@ def _ipv4(value):
     return str(ipaddress.IPv4Address(value))
 
 
+# Check kinds TopoLog derives from configurations; a user rule of these kinds names its own show command.
+EXTENDED_KINDS = {'interface_up', 'interface_address', 'ipv6_address', 'route6_covered', 'static_route', 'route_covered',
+                  'eigrp_neighbor', 'isis_neighbor', 'ipv6_neighbor', 'bgp_peer', 'redistribution', 'ssh_enabled',
+                  'isakmp_sa', 'ipsec_sa', 'nat_interfaces', 'vtp_mode', 'stp_root', 'vpcs_ip', 'vlan_active', 'trunk',
+                  'hsrp', 'dhcp_pool', 'static_nat', 'acl_binding', 'stp_instance'}
+# Read-only: a single show command, no pipes or control characters.
+SHOW_COMMAND = re.compile(r'show [A-Za-z0-9 ./:_-]{1,100}')
+
+
 def command_for(rule, os_type):
     kind = rule.get('kind')
+    if kind in EXTENDED_KINDS:
+        command = rule.get('command')
+        if not isinstance(command, str) or not SHOW_COMMAND.fullmatch(command):
+            raise ValueError('Check command must be one read-only show command')
+        if kind == 'vpcs_ip' and os_type != 'vpcs':
+            raise ValueError('VPCS check needs a VPCS node')
+        if kind != 'vpcs_ip' and os_type not in ('ios', 'asa'):
+            raise ValueError('No supported driver for ' + kind)
+        return command
     if kind == 'ping':
         address = _ipv4(rule['target'])
         minimum = rule.get('min_percent', 100)

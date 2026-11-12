@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog.resultdir import records as R  # noqa: E402
 from topolog import profiles, settings
 from topolog.engine import Runner, collect_node, discover, draft, error_detail, load_rules, verdict, wait_computes

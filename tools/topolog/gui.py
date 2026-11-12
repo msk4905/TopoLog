@@ -11,8 +11,10 @@ from pathlib import Path
 import os
 import queue
 import threading
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, simpledialog
+from tkinter import font as tkfont
 import webbrowser
 from . import settings
 from . import resources
@@ -27,13 +29,69 @@ from . import preflight
 from .transport import API
 
 STEPS = ['폴더', 'enable 권한', '토폴로지 사진', '보고서 범위', '확인·실행']
+SETTINGS_WIDTH = 210
 COLORS = {'bg': '#f4f6f8', 'panel': '#ffffff', 'side': '#1f3b4d', 'side_text': '#c9d6df', 'side_active': '#ffffff',
           'accent': '#176b78', 'muted': '#5b6b76', 'warn_bg': '#fff4d6', 'warn': '#7a5600', 'error': '#a12a2a', 'line': '#d9e0e5'}
 STATUS_LABELS = {'pending': '수집 대기', 'excluded': '제외', 'completed': '완료', 'error': '오류', 'cancelled': '중지',
                  'cleanup_failed': '정리 오류', 'not_run': '실행 안 함'}
 PHOTO_LABELS = {'captured': '저장', 'unavailable': '없음'}
-# Button widths in characters: one width per row of buttons so they line up.
-RUN_WIDTH, NAV_WIDTH = 10, 10
+
+
+def fit(buttons):
+    """Same minimum width for a group of buttons; a longer label still widens its own button, so text is never cut."""
+    from tkinter import font as tkfont
+    if not buttons:
+        return
+    measure = tkfont.Font(root=buttons[0], family=_font_family(), size=10, weight='bold')
+    unit = max(1, measure.measure('0'))
+    width = max(-(-measure.measure(b.cget('text')) // unit) for b in buttons) + 1
+    for button in buttons:
+        button.configure(width=-width)   # negative ttk width = minimum, the label's natural size wins
+
+
+def shorten_path(text, limit, measure):
+    """Fit a path into `limit` pixels by replacing whole middle folders with '…'; drive and last folder stay."""
+    if not text or measure(text) <= limit:
+        return text
+    separator = '\\' if '\\' in text else '/'
+    parts = text.split(separator)
+    if len(parts) < 3:
+        return text
+    head, tail = [parts[0]], parts[1:]
+    while len(tail) > 1:
+        tail = tail[1:]
+        candidate = separator.join(head + ['…'] + tail)
+        if measure(candidate) <= limit:
+            return candidate
+    # Only the last folder is left: keep it whole even when it is longer than the limit.
+    return separator.join(head + ['…'] + tail)
+
+
+PROJECT_STEPS = [('프로젝트 열기', ('프로젝트 ',)), ('장비 시작', ('장비 시작',)), ('설정 수집', ('장비 ',)),
+                 ('사진·ping 확인', ('GNS3 사진 저장·도달성', '도달성 확인')), ('최종 확인', ('최종 경로', '방화벽 흐름', '토폴로지 저장')),
+                 ('정지·저장', ('장비 상태 복원', '프로젝트 처리 완료'))]
+
+
+def project_steps(stage):
+    """'✓ 프로젝트 열기 → ✓ 장비 시작 → ▶ 설정 수집 → …' for a stage label of the engine; '' outside a project."""
+    current = None
+    for index, (label, prefixes) in reversed(list(enumerate(PROJECT_STEPS))):
+        if index == 2:
+            matched = stage.startswith('프로젝트 ') and ' · 장비 ' in stage
+        elif index == 0:
+            matched = stage.startswith('프로젝트 ') and ' · 장비 ' not in stage and not stage.startswith('프로젝트 처리 완료')
+        else:
+            matched = stage.startswith(prefixes)
+        if matched:
+            current = index
+            break
+    if current is None:
+        return ''
+    marks = []
+    for index, (label, _) in enumerate(PROJECT_STEPS):
+        mark = '✓' if index < current or (index == current and stage.startswith('프로젝트 처리 완료')) else ('▶' if index == current else '○')
+        marks.append(mark + ' ' + label)
+    return '   '.join(marks)
 
 
 def log_directory():
@@ -114,6 +172,13 @@ def launch(run_loop=True):
     style.configure('Accent.TButton', font=(family, 10, 'bold'), padding=(14, 6), foreground='#ffffff', background=COLORS['accent'])
     style.map('Accent.TButton', background=[('disabled', '#9fb5bb'), ('active', '#125761')])
     style.configure('TButton', padding=(14, 6))
+    style.configure('Compact.TButton', padding=(8, 6))
+    # Frequently used buttons: light accent fill and accent text, below the filled main action.
+    style.configure('Soft.TButton', font=(family, 10, 'bold'), padding=(14, 6), foreground=COLORS['accent'], background='#e1eff1')
+    style.map('Soft.TButton', background=[('disabled', '#eef1f3'), ('active', '#cde4e8')], foreground=[('disabled', '#9aa8b0')])
+    # Stop: red text so it is not pressed by mistake for another button.
+    style.configure('Danger.TButton', foreground=COLORS['error'])
+    style.map('Danger.TButton', foreground=[('disabled', '#9aa8b0')])
     style.configure('TMenubutton', padding=(14, 6))
     style.configure('Treeview', rowheight=24, font=(family, 10))
     style.configure('Treeview.Heading', font=(family, 10, 'bold'))
@@ -122,7 +187,9 @@ def launch(run_loop=True):
     defaults = settings.load()
     projects = tk.StringVar(value=defaults['project_directory'])
     output = tk.StringVar(value=defaults['output_directory'])
-    rules = tk.StringVar()
+    from .criteria_editor import default_path as criteria_default
+    # The criteria file the editor saves is applied to every run without choosing it again.
+    rules = tk.StringVar(value=str(criteria_default()) if criteria_default().is_file() else '')
     allow_enable = tk.BooleanVar(value=defaults.get('allow_enable', True))
     default_password = tk.StringVar()
     capture = tk.BooleanVar(value=defaults.get('capture_screenshot', True))
@@ -160,20 +227,25 @@ def launch(run_loop=True):
         label = tk.Label(side, text='{}  {}'.format(index + 1, name), background=COLORS['side'], foreground=COLORS['side_text'],
                          font=(family, 11), anchor='w', padx=20, pady=8)
         label.pack(fill='x')
+        label.bind('<Button-1>', lambda event, step=index: step_clicked(step))
+        label.configure(cursor='hand2')
         step_labels.append(label)
     body = ttk.Frame(window, padding=(22, 18, 22, 12))
     body.pack(side='left', fill='both', expand=True)
     card = ttk.Frame(body, style='Panel.TFrame', padding=(24, 20))
     card.pack(fill='both', expand=True)
     nav = ttk.Frame(body, padding=(0, 12, 0, 0))
-    nav.pack(fill='x')
+    nav.pack(side='bottom', fill='x', before=card)
     pages = []
     keep_images = window._topolog_images = []   # Tk deletes an image once Python drops it
 
     def page(title, lead):
         frame = ttk.Frame(card, style='Panel.TFrame')
         ttk.Label(frame, text=title, style='Title.TLabel').pack(anchor='w')
-        ttk.Label(frame, text=lead, style='Lead.TLabel', wraplength=760, justify='left').pack(anchor='w', pady=(6, 16))
+        lead_label = ttk.Label(frame, text=lead, style='Lead.TLabel', wraplength=760, justify='left')
+        lead_label.pack(anchor='w', pady=(6, 16))
+        # Follow the page width so the lead wraps instead of running past the edge in a narrow window.
+        frame.bind('<Configure>', lambda event, label=lead_label: label.configure(wraplength=min(760, max(200, event.width - 8))), add='+')
         pages.append(frame)
         return frame
 
@@ -260,57 +332,113 @@ def launch(run_loop=True):
         controls.append(radio)
     picture(fourth, 'wizard-scope.png', '설명용 그림: 대표만 선택해도 나머지 프로젝트는 전체 목록과 HTML 보고서, 원문 파일에 그대로 남습니다.', 560, 220)
 
-    # Page 5: confirm and run
-    fifth = page('확인 및 실행', '아래 설정으로 수집합니다. GNS3와 연동 VM이 꺼져 있으면 자동으로 실행하고 준비될 때까지 기다립니다.')
-    summary = ttk.Frame(fifth, style='Panel.TFrame')
-    summary.pack(fill='x')
-    summary.columnconfigure(1, weight=1)
+    # Page 5: confirm and run. Left: settings; right: project list, progress and run buttons; bottom: result buttons.
+    fifth = page('확인 및 실행', '설정을 확인하고 수집할 프로젝트를 고른 뒤 시작하세요. GNS3와 연동 VM이 꺼져 있으면 자동으로 실행하고 준비될 때까지 기다립니다.')
+    result_row = ttk.Frame(fifth, style='Panel.TFrame')
+    result_row.pack(side='bottom', fill='x')
+    ttk.Separator(result_row, orient='horizontal').pack(fill='x', pady=(10, 8))
+    side_bar = ttk.Frame(result_row, style='Panel.TFrame')
+    side_bar.pack(fill='x')
+    ttk.Label(side_bar, text='결과', style='Value.TLabel').pack(side='left', padx=(0, 4))
+    columns = ttk.Frame(fifth, style='Panel.TFrame')
+    columns.pack(fill='both', expand=True)
+    settings_column = ttk.Frame(columns, style='Panel.TFrame', width=SETTINGS_WIDTH)
+    settings_column.pack(side='left', fill='y')
+    settings_column.pack_propagate(False)
+    ttk.Separator(columns, orient='vertical').pack(side='left', fill='y', padx=16)
+    work_column = ttk.Frame(columns, style='Panel.TFrame')
+    work_column.pack(side='left', fill='both', expand=True)
+
+    # Settings change sits beside the heading of the settings it changes, so a tall column never hides it.
+    run_bar = ttk.Frame(settings_column, style='Panel.TFrame')
+    run_bar.pack(fill='x', pady=(0, 2))
+    ttk.Label(run_bar, text='수집 설정', style='Value.TLabel').pack(side='left')
     summary_values = {}
-    # Folder paths get a full row each so a long path wraps instead of being clipped.
-    for row, key in enumerate(['프로젝트 폴더', '결과 저장 폴더']):
-        ttk.Label(summary, text=key, style='Key.TLabel').grid(row=row, column=0, sticky='w', padx=(0, 10), pady=2)
+    path_labels = []
+    tip = {'window': None}
+    measure_value = tkfont.Font(root=window, family=family, size=10, weight='bold')
+
+    def hide_tip(event=None):
+        if tip['window'] is not None:
+            tip['window'].destroy()
+            tip['window'] = None
+
+    def show_tip(event, text):
+        hide_tip()
+        top = tk.Toplevel(window)
+        top.wm_overrideredirect(True)
+        top.geometry('+{}+{}'.format(event.x_root + 12, event.y_root + 16))
+        tk.Label(top, text=text, background='#ffffe8', foreground='#1d2b33', relief='solid', borderwidth=1,
+                 font=(family, 9), padx=6, pady=3).pack()
+        tip['window'] = top
+
+    def open_path(text):
+        if os.name == 'nt' and text and Path(text).is_dir():
+            os.startfile(text)
+
+    def fit_paths(event=None):
+        limit = settings_column.winfo_width() - 8
+        if limit < 40:
+            return
+        for label, value in path_labels:
+            label.configure(text=shorten_path(value.get(), limit, measure_value.measure))
+
+    for key in ['프로젝트 폴더', '결과 저장 폴더', 'enable 권한', '토폴로지 사진', '보고서 범위', '대상 프로젝트', '기대값']:
         value = tk.StringVar()
-        ttk.Label(summary, textvariable=value, style='Value.TLabel', wraplength=680).grid(row=row, column=1, columnspan=3, sticky='w', pady=2)
         summary_values[key] = value
-    for index, key in enumerate(['enable 권한', '토폴로지 사진', '보고서 범위', '대상 프로젝트']):
-        row, column = 2 + index // 2, (index % 2) * 2
-        ttk.Label(summary, text=key, style='Key.TLabel').grid(row=row, column=column, sticky='w', padx=(0, 10), pady=2)
-        value = tk.StringVar()
-        ttk.Label(summary, textvariable=value, style='Value.TLabel', wraplength=300).grid(row=row, column=column + 1, sticky='w', padx=(0, 24), pady=2)
-        summary_values[key] = value
-    run_bar = ttk.Frame(fifth, style='Panel.TFrame')
-    run_bar.pack(fill='x', pady=(12, 6))
-    side_bar = ttk.Frame(run_bar, style='Panel.TFrame')
-    status_box = ttk.Frame(fifth, style='Panel.TFrame')
-    status_box.pack(fill='x')
+        ttk.Label(settings_column, text=key, style='Key.TLabel').pack(anchor='w', pady=(5, 0))
+        if key.endswith('폴더'):
+            # A long path is shortened in the middle; hovering shows it whole and a click opens it.
+            label = ttk.Label(settings_column, style='Value.TLabel', cursor='hand2')
+            label.bind('<Enter>', lambda event, v=value: show_tip(event, v.get()))
+            label.bind('<Leave>', hide_tip)
+            label.bind('<Button-1>', lambda event, v=value: open_path(v.get()))
+            path_labels.append((label, value))
+            value.trace_add('write', lambda *args: window.after_idle(fit_paths))
+        else:
+            label = ttk.Label(settings_column, textvariable=value, style='Value.TLabel', wraplength=SETTINGS_WIDTH - 8, justify='left')
+        label.pack(anchor='w')
+    settings_column.bind('<Configure>', fit_paths)
+
+    pick_text = tk.StringVar(value='')
+    ttk.Label(work_column, textvariable=pick_text, style='Value.TLabel').pack(anchor='w')
+    pick_bar = ttk.Frame(work_column, style='Panel.TFrame')
+    pick_bar.pack(fill='x', pady=(4, 6))
+    run_row = ttk.Frame(work_column, style='Panel.TFrame')
+    run_row.pack(side='bottom', fill='x', pady=(8, 0))
+    progress_controls = run_row
+    notice = ttk.Label(work_column, textvariable=notice_text, style='Warn.TLabel', wraplength=520)
+    status_box = ttk.Frame(work_column, style='Panel.TFrame')
+    status_box.pack(side='bottom', fill='x')
     status_box.columnconfigure(1, weight=1)
-    ttk.Label(status_box, text='프로젝트', style='Key.TLabel').grid(row=0, column=0, sticky='w')
-    ttk.Label(status_box, textvariable=project_text, style='Big.TLabel').grid(row=0, column=1, sticky='w')
-    ttk.Label(status_box, text='현재 작업', style='Key.TLabel').grid(row=1, column=0, sticky='w', pady=(4, 0))
-    ttk.Label(status_box, textvariable=task_text, style='Panel.TLabel', wraplength=640).grid(row=1, column=1, sticky='w', pady=(4, 0))
+    ttk.Label(status_box, textvariable=project_text, style='Value.TLabel').grid(row=0, column=0, sticky='w', padx=(0, 10), pady=(8, 0))
+    ttk.Label(status_box, textvariable=task_text, style='Panel.TLabel', wraplength=420).grid(row=0, column=1, sticky='w', pady=(8, 0))
+    # Where the current project is in its own sequence, and what each device is doing right now.
+    steps_text = tk.StringVar(value='')
+    activity_text = tk.StringVar(value='')
+    steps_label = ttk.Label(status_box, textvariable=steps_text, style='Caption.TLabel', wraplength=520)
+    steps_label.grid(row=1, column=0, columnspan=2, sticky='w', pady=(4, 0))
+    activity_label = ttk.Label(status_box, textvariable=activity_text, style='Panel.TLabel', wraplength=520, justify='left')
+    activity_label.grid(row=2, column=0, columnspan=2, sticky='w', pady=(2, 0))
+    status_box.bind('<Configure>', lambda event: [label.configure(wraplength=max(200, event.width - 8)) for label in (steps_label, activity_label)])
     bar_row = ttk.Frame(status_box, style='Panel.TFrame')
-    bar_row.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(8, 2))
+    bar_row.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(6, 2))
     bar_row.columnconfigure(0, weight=1)
     progress_bar = ttk.Progressbar(bar_row, variable=percent, maximum=100, mode='determinate', style='Horizontal.TProgressbar')
     progress_bar.grid(row=0, column=0, sticky='ew')
     ttk.Label(bar_row, textvariable=percent_text, style='Value.TLabel', width=5).grid(row=0, column=1, padx=(10, 0))
-    ttk.Label(status_box, textvariable=time_text, style='Caption.TLabel').grid(row=3, column=0, columnspan=2, sticky='w')
-    notice = ttk.Label(fifth, textvariable=notice_text, style='Warn.TLabel', wraplength=760)
-    ttk.Label(fifth, textvariable=status, style='Panel.TLabel', wraplength=760).pack(anchor='w', pady=(6, 0))
-    ttk.Label(fifth, textvariable=outcome_text, style='Value.TLabel', wraplength=760).pack(anchor='w', pady=(2, 6))
-    pick_bar = ttk.Frame(fifth, style='Panel.TFrame')
-    pick_bar.pack(fill='x', pady=(0, 4))
-    pick_text = tk.StringVar(value='')
-    ttk.Label(pick_bar, textvariable=pick_text, style='Panel.TLabel').pack(side='left')
-    tree_frame = ttk.Frame(fifth, style='Panel.TFrame')
+    ttk.Label(status_box, textvariable=time_text, style='Caption.TLabel').grid(row=4, column=0, columnspan=2, sticky='w')
+    ttk.Label(status_box, textvariable=status, style='Panel.TLabel', wraplength=520).grid(row=5, column=0, columnspan=2, sticky='w', pady=(4, 0))
+    ttk.Label(status_box, textvariable=outcome_text, style='Value.TLabel', wraplength=520).grid(row=6, column=0, columnspan=2, sticky='w')
+    tree_frame = ttk.Frame(work_column, style='Panel.TFrame')
     tree_frame.pack(fill='both', expand=True)
     tree = ttk.Treeview(tree_frame, columns=('status', 'photo'), height=5)
     tree.heading('#0', text='프로젝트')
     tree.heading('status', text='상태')
     tree.heading('photo', text='GNS3 사진')
-    tree.column('#0', width=280)
-    tree.column('status', width=360)
-    tree.column('photo', width=90, anchor='center')
+    tree.column('#0', width=200)
+    tree.column('status', width=220)
+    tree.column('photo', width=90, minwidth=90, stretch=False, anchor='center')
     tree.pack(side='left', fill='both', expand=True)
     tree_scroll = ttk.Scrollbar(tree_frame, command=tree.yview)
     tree_scroll.pack(side='right', fill='y')
@@ -486,9 +614,9 @@ def launch(run_loop=True):
                     outcome.put(('failed', type(exc).__name__))
             threading.Thread(target=work, daemon=True).start()
             top.after(100, done)
-        send = ttk.Button(buttons, text='보내기', style='Accent.TButton', command=submit, width=NAV_WIDTH, state='disabled')
+        send = ttk.Button(buttons, text='보내기', style='Accent.TButton', command=submit, state='disabled')
         send.pack(side='left')
-        ttk.Button(buttons, text='닫기', command=top.destroy, width=NAV_WIDTH).pack(side='right')
+        ttk.Button(buttons, text='닫기', command=top.destroy).pack(side='right')
         agree.trace_add('write', lambda *_: send.state(['!disabled'] if agree.get() else ['disabled']))
         state['report_window'] = top
         return top
@@ -504,11 +632,11 @@ def launch(run_loop=True):
     window.report_callback_exception = callback_failed
 
     # ---------- navigation ----------
-    back = ttk.Button(nav, text='이전', command=lambda: go(state['step'] - 1), width=NAV_WIDTH)
+    back = ttk.Button(nav, text='이전', command=lambda: go(state['step'] - 1))
     back.pack(side='left')
-    forward = ttk.Button(nav, text='다음', style='Accent.TButton', command=lambda: go(state['step'] + 1), width=NAV_WIDTH)
+    forward = ttk.Button(nav, text='다음', style='Accent.TButton', command=lambda: go(state['step'] + 1))
     forward.pack(side='right')
-    log_button = ttk.Button(nav, text='상세 기록 보기', command=show_log, width=NAV_WIDTH + 3)
+    log_button = ttk.Button(nav, text='상세 기록 보기', command=show_log)
     log_button.pack(side='right', padx=(0, 10))
 
     def scope_label():
@@ -526,6 +654,13 @@ def launch(run_loop=True):
         overlap = len(state.get('duplicates') or [])
         summary_values['대상 프로젝트'].set('{}개{}{}'.format(chosen, ' (선택 범위)' if state['selected'] is not None else '',
                                                     ' · 같은 ID라 임시 사본으로 수집 {}개'.format(overlap) if overlap else ''))
+        try:
+            saved = load_rules(rules.get() or None)
+            off = sum(len(n.get('disabled', [])) for p in saved.values() for n in p.get('nodes', {}).values())
+            own = sum(len(n.get('checks', [])) for p in saved.values() for n in p.get('nodes', {}).values())
+            summary_values['기대값'].set('자동 확인' + (' · 사용자 지정 {}개 · 제외 {}개'.format(own, off) if own or off else ''))
+        except (OSError, ValueError):
+            summary_values['기대값'].set('기대값 파일을 읽지 못했습니다 · 자동 확인만 사용')
 
     def selectable():
         return [e.get('project_id') for e in state['entries'] if e.get('status') == 'pending' and e.get('project_id')]
@@ -550,7 +685,7 @@ def launch(run_loop=True):
             tree.insert('', 'end', iid=pid or entry['file'], text=entry.get('name', Path(entry['file']).stem),
                         values=(label, '' if entry.get('status') == 'excluded' else '—'), **options)
         count = sum(1 for pid in selectable() if picked(pid))
-        pick_text.set('수집할 프로젝트를 체크하세요 · {}/{}개 선택'.format(count, len(selectable())))
+        pick_text.set('수집할 프로젝트 · {}/{}개 선택'.format(count, len(selectable())))
 
     def set_picked(ids):
         ids = set(ids) & set(selectable())
@@ -572,9 +707,9 @@ def launch(run_loop=True):
         tree.selection_set(row)
     tree.bind('<ButtonRelease-1>', toggle_project)
     tree.bind('<space>', toggle_project)
-    pick_none = ttk.Button(pick_bar, text='전체 해제', command=lambda: set_picked([]), width=RUN_WIDTH)
+    pick_none = ttk.Button(pick_bar, style='Compact.TButton', text='전체 해제', command=lambda: set_picked([]))
     pick_none.pack(side='right')
-    pick_all = ttk.Button(pick_bar, text='전체 선택', command=lambda: set_picked(selectable()), width=RUN_WIDTH)
+    pick_all = ttk.Button(pick_bar, style='Compact.TButton', text='전체 선택', command=lambda: set_picked(selectable()))
     pick_all.pack(side='right', padx=(0, 8))
     controls.extend([pick_all, pick_none])
 
@@ -742,21 +877,18 @@ def launch(run_loop=True):
 
     def saved_criteria(path):
         rules.set(path)
-        append('기대값 파일 저장: ' + path)
+        append('기대값 저장 · 다음 수집과 다시 정리부터 적용: ' + path)
+        refresh_summary()
 
     def edit_criteria():
         selected = scan()
         if selected:
             try:
-                return open_editor(window, selected[0], rules.get() or None, on_saved=saved_criteria, initial_directory=str(selected[1]))
+                return open_editor(window, selected[0], rules.get() or None, on_saved=saved_criteria, initial_directory=str(selected[1]),
+                                   result_folder=state['result'])
             except Exception as exc:
                 messagebox.showerror('기대값 편집', str(exc), parent=window)
 
-    def select_rules():
-        name = filedialog.askopenfilename(parent=window, filetypes=[('JSON', '*.json')])
-        if name:
-            rules.set(name)
-            append('기대값 파일 선택: ' + name)
 
     def start_worker(operation, label, pausable=True):
         state.update(running=True, has_run=True, pausable=pausable)
@@ -768,6 +900,9 @@ def launch(run_loop=True):
         gate.resume()
         for widget in controls:
             widget.configure(state='disabled')
+        for key, button in tool_buttons.items():
+            if key not in ('logs', 'feedback') and button.winfo_exists():
+                button.state(['disabled'])
         back.configure(state='disabled')
         stop.configure(state='normal')
         pause_button.configure(state='normal' if pausable else 'disabled', text='일시중지')
@@ -838,7 +973,6 @@ def launch(run_loop=True):
             return folder, result
         start_worker(collect, '수집 중입니다. 중지하면 장비 상태를 복구하고 그때까지의 결과를 보존합니다.')
         fill_tree()
-        show_log()
 
     def reassess_saved():
         try:
@@ -875,20 +1009,15 @@ def launch(run_loop=True):
             status.set('현재 작업이 끝나는 지점에서 일시중지합니다. 진행 중인 명령·저장 창은 끝까지 마칩니다.')
             append('일시중지 요청')
 
-    start_button = ttk.Button(run_bar, text='수집 시작', style='Accent.TButton', command=run, width=RUN_WIDTH)
+    start_button = ttk.Button(progress_controls, text='수집 시작', style='Accent.TButton', command=run)
     start_button.pack(side='left')
-    pause_button = ttk.Button(run_bar, text='일시중지', command=toggle_pause, state='disabled', width=RUN_WIDTH)
+    pause_button = ttk.Button(progress_controls, text='일시중지', command=toggle_pause, state='disabled')
     pause_button.pack(side='left', padx=(8, 0))
-    stop = ttk.Button(run_bar, text='중지', command=request_stop, state='disabled', width=RUN_WIDTH)
+    stop = ttk.Button(progress_controls, text='중지', style='Danger.TButton', command=request_stop, state='disabled')
     stop.pack(side='left', padx=(8, 0))
-    side_bar.pack(side='right')
-    change = ttk.Button(nav, text='설정 변경', command=lambda: go(0), width=NAV_WIDTH)
-    change.pack(side='left', padx=(8, 0))
-    tools_button = ttk.Menubutton(nav, text='도구', width=NAV_WIDTH - 2)
-    tools_menu = tk.Menu(tools_button, tearoff=False)
-    tools_button['menu'] = tools_menu
-    tools_button.pack(side='left', padx=(8, 0))
-    nav_extra = [change, tools_button]
+    change = ttk.Button(run_bar, text='설정 변경', style='Compact.TButton', command=lambda: go(0))
+    change.pack(side='right')
+    nav_extra = []
 
     def open_result():
         if state['result']:
@@ -904,18 +1033,18 @@ def launch(run_loop=True):
     def open_folder():
         if state['result'] and os.name == 'nt':
             os.startfile(str(state['result']))
-    folder_button = ttk.Button(side_bar, text='결과 폴더', command=open_folder, width=RUN_WIDTH)
+    folder_button = ttk.Button(side_bar, text='결과 폴더', style='Soft.TButton', command=open_folder)
     folder_button.pack(side='left', padx=(8, 0))
-    result_button = ttk.Button(side_bar, text='보고서 열기', command=open_result, state='normal' if state['result'] else 'disabled', width=RUN_WIDTH)
+    result_button = ttk.Button(side_bar, text='보고서 열기', style='Soft.TButton', command=open_result, state='normal' if state['result'] else 'disabled')
     result_button.pack(side='left', padx=(8, 0))
     # Picture titles belong with the result, not with the maintenance tools.
-    titles_button = ttk.Button(side_bar, text='사진 제목 정리', command=edit_titles, state='normal' if state['result'] else 'disabled', width=RUN_WIDTH + 2)
+    titles_button = ttk.Button(side_bar, text='사진 제목 정리', style='Soft.TButton', command=edit_titles, state='normal' if state['result'] else 'disabled')
     titles_button.pack(side='left', padx=(8, 0))
     actions['titles'] = titles_button
     # Enabled only when the last run left GNS3 pictures unsaved; not part of `controls` so a run's end does not enable it.
     # Sits above the project list, next to its 'GNS3 사진' column.
-    retake_button = ttk.Button(pick_bar, text='사진 다시 저장', command=lambda: retake(), state='disabled', width=RUN_WIDTH + 2)
-    retake_button.pack(side='right', padx=(0, 8))
+    retake_button = ttk.Button(side_bar, text='사진 다시 저장', command=lambda: retake(), state='disabled')
+    retake_button.pack(side='left', padx=(8, 0))
     actions['retake'] = retake_button
 
     def retake():
@@ -935,23 +1064,99 @@ def launch(run_loop=True):
         retake_button.configure(state='disabled')
         start_worker(operation, 'GNS3 사진을 다시 저장합니다. 저장 창이 닫힐 때까지 GNS3 창을 조작하지 마세요.', pausable=False)
 
-    # Secondary tools keep every earlier feature, out of the main path.
-    hidden = ttk.Frame(window)
-    for key, label, command in [('scan', '프로젝트 다시 확인', scan),
-                                ('retry', '이전 결과에서 재수집 대상 고르기', lambda: choose_projects(True)),
-                                ('rules', '기대값 파일 선택', select_rules), ('edit', '기대값 편집', edit_criteria),
-                                ('reassess', '기존 결과 다시 정리', reassess_saved), ('regenerate', '보고서 다시 만들기(현재 범위)', regenerate),
-                                ('share', '공개 검토용 사본 만들기', share)]:
-        tools_menu.add_command(label=label, command=command)
-        button = ttk.Button(hidden, text=label, command=command)
-        controls.append(button)
-        actions[key] = button
-    tools_menu.add_separator()
-    tools_menu.add_command(label='상세 기록 보기', command=show_log)
-    tools_menu.add_command(label='기록 폴더 열기', command=open_log_folder)
-    tools_menu.add_command(label='피드백 보내기', command=lambda: report_error(feedback=True))
+    # Tools open in their own window from the 도구 button, grouped by what they work on.
+    TOOLS = [('수집 준비', [('edit', '기대값 편집', edit_criteria,
+                             '장비별 자동 확인 항목을 끄거나 값을 바꾸고 새 항목을 추가합니다. 저장하면 다음 수집부터 적용됩니다.'),
+                            ('scan', '프로젝트 다시 확인', scan,
+                             '프로젝트 폴더를 다시 읽어 수집할 프로젝트 목록을 새로 만듭니다.')]),
+             ('기존 결과', [('reassess', '기존 결과 다시 정리', reassess_saved,
+                             '이미 수집한 결과 폴더를 지금 기대값으로 다시 판정합니다. 장비 명령은 실행하지 않습니다.'),
+                            ('regenerate', '보고서 다시 만들기', regenerate,
+                             '수집한 결과 폴더로 보고서만 다시 만듭니다. 판정은 바꾸지 않습니다.'),
+                            ('share', '공개 검토용 사본 만들기', share,
+                             '암호와 키를 가린 사본을 따로 만듭니다. 원본 결과 폴더는 그대로 둡니다.')]),
+             ('기록·문의', [('logs', '기록 폴더 열기', open_log_folder,
+                             '프로그램 실행 기록과 오류 보고 사본이 있는 폴더를 엽니다.'),
+                            ('feedback', '피드백 보내기', lambda: report_error(feedback=True),
+                             '불편한 점이나 의견을 개발자에게 보냅니다.')])]
+    tool_window = {'window': None}
+    tool_buttons = {}
+
+    def run_tool(command):
+        if tool_window['window'] is not None:
+            tool_window['window'].destroy()
+        command()
+
+    def open_tools():
+        if tool_window['window'] is not None and tool_window['window'].winfo_exists():
+            tool_window['window'].lift()
+            return
+        top = tk.Toplevel(window)
+        top.title('TopoLog · 도구')
+        top.transient(window)
+        top.resizable(False, False)
+        top.configure(background=COLORS['panel'])
+        frame = ttk.Frame(top, style='Panel.TFrame', padding=(20, 16))
+        frame.pack(fill='both', expand=True)
+        row = 0
+        made = []
+        for heading, items in TOOLS:
+            ttk.Label(frame, text=heading, style='Value.TLabel').grid(row=row, column=0, columnspan=2, sticky='w', pady=(0 if row == 0 else 12, 4))
+            row += 1
+            for key, label, command, note in items:
+                button = ttk.Button(frame, text=label, command=lambda c=command: run_tool(c),
+                                    style='Soft.TButton' if key in ('edit', 'regenerate') else 'TButton')
+                button.grid(row=row, column=0, sticky='ew', pady=2)
+                ttk.Label(frame, text=note, style='Lead.TLabel', wraplength=430, justify='left').grid(row=row, column=1, sticky='w', padx=(12, 0))
+                if state['running'] and key not in ('logs', 'feedback'):
+                    button.state(['disabled'])
+                tool_buttons[key] = button
+                made.append(button)
+                row += 1
+        fit(made)
+        ttk.Button(frame, text='닫기', command=top.destroy).grid(row=row, column=1, sticky='e', pady=(14, 0))
+        top.bind('<Destroy>', lambda event: tool_window.update(window=None) if event.widget is top else None)
+        tool_window['window'] = top
+        top._topolog_tools = tool_buttons
+        return top
+
+    class ToolAction:
+        """actions[key] for a tool: invoking it runs the tool like its button in the tools window."""
+        def __init__(self, key, command):
+            self.key, self.command = key, command
+
+        def invoke(self):
+            if self.key in ('logs', 'feedback') or not state['running']:
+                return self.command()
+
+        def cget(self, option):
+            if option == 'state':
+                return 'disabled' if state['running'] and self.key not in ('logs', 'feedback') else 'normal'
+            raise KeyError(option)
+
+        def configure(self, **options):
+            pass
+
+    for heading, items in TOOLS:
+        for key, label, command, note in items:
+            actions[key] = ToolAction(key, command)
+    tools_button = ttk.Button(nav, text='도구', style='Soft.TButton', command=open_tools)
+    tools_button.pack(side='right', padx=(0, 10))
+    actions['tools'] = tools_button
+
+    def step_clicked(step):
+        if not state['running'] and step != state['step']:
+            go(step)
+    # Picking from an earlier result changes the ticks of the project list, so it sits above that list.
+    earlier = ttk.Button(pick_bar, style='Compact.TButton', text='이전 결과에서 고르기', command=lambda: choose_projects(True))
+    earlier.pack(side='right', padx=(0, 8))
+    actions['retry'] = earlier
+    controls.append(earlier)
+    fit([start_button, pause_button, stop])
+    fit([folder_button, result_button, titles_button, retake_button])
+    fit([back, forward, log_button, tools_button])
     actions.update(run=start_button, pause=pause_button, next=forward, back=back)
-    controls.extend([start_button, change, tools_button])
+    controls.extend([start_button, change])
 
     def close():
         if state['running']:
@@ -982,15 +1187,44 @@ def launch(run_loop=True):
         pid = event.get('project_id') or event.get('project_done')
         return pid if pid and tree.exists(pid) else None
 
+    activity = {}
+
+    def track_activity(text):
+        """Keep the latest message per device ('[R1] 수집: show ip route'); drop it once the device is done."""
+        done = re.match(r'^(.+?): (완료|일부 완료|실패|대상 아님|권한 확인 필요|지원되지 않는 장비|중지)', text)
+        if done:
+            activity.get('devices', {}).pop(done[1], None)
+            return
+        current = re.match(r'^\[(.+?)\] (.+)$', text)
+        if current:
+            label = current[2]
+            for prefix in ('장비: ', '수집: '):
+                if label.startswith(prefix):
+                    label = label[len(prefix):]
+            if label == current[1]:
+                label = '연결 중'
+            activity.setdefault('devices', {})[current[1]] = label
+
+    def describe_activity():
+        devices = activity.get('devices') or {}
+        if not devices:
+            return ''
+        shown = ['· {}  {}'.format(name, label.rstrip('.')) for name, label in list(devices.items())[:3]]
+        more = len(devices) - len(shown)
+        return '\n'.join(shown) + ('\n· 외 {}대'.format(more) if more > 0 else '')
+
     def handle_progress(value):
         tracker.update(value)
+        if 'project_index' in value and value['project_index'] != activity.get('project'):
+            activity.clear()                     # devices of the previous project are no longer being worked on
+            activity['project'] = value['project_index']
         row = project_row(value)
         if row and 'project_done' in value:
             label = STATUS_LABELS.get(value.get('project_status'), value.get('project_status') or '')
             photo = PHOTO_LABELS.get(value.get('photo'), '—') if capture.get() else '사용 안 함'
             tree.item(row, values=(label, photo))
         elif row and value.get('task'):
-            tree.item(row, values=('진행 중 · ' + value['task'].split(' · ')[0], tree.item(row, 'values')[1] if tree.item(row, 'values') else '—'))
+            tree.item(row, values=('진행 중 · ' + ('GNS3 사진 저장 중' if '조작' in value['task'] else value['task'].split(' · ')[0]), tree.item(row, 'values')[1] if tree.item(row, 'values') else '—'))
             tree.see(row)
         if 'gate_paused' in value:
             if value['gate_paused']:
@@ -1010,6 +1244,9 @@ def launch(run_loop=True):
         gate.resume()
         for widget in controls:
             widget.configure(state='normal')
+        for button in tool_buttons.values():
+            if button.winfo_exists():
+                button.state(['!disabled'])
         sync_password()
         stop.configure(state='disabled')
         pause_button.configure(state='disabled', text='일시중지')
@@ -1055,6 +1292,8 @@ def launch(run_loop=True):
         missing = failed_pictures(value[1]) if kind == 'done' else []
         retake_button.configure(state='normal' if missing and state['result'] else 'disabled')
         retaken = state.pop('retaking', False)
+        if kind == 'done' and not value[2] and not state['closing'] and not retaken:
+            messagebox.showinfo('수집 완료', '수집이 끝났습니다.\n\n' + outcome_text.get().split(' · 결과: ')[0], parent=window)
         if kind == 'done' and not value[2] and not state['closing'] and missing and not retaken:
             names = ', '.join(p.get('name', '') for p in missing[:8]) + (' 외' if len(missing) > 8 else '')
             if messagebox.askyesno('GNS3 사진 다시 저장', 'GNS3 사진 {}개를 저장하지 못했습니다: {}\n\n지금 다시 저장할까요? 해당 프로젝트를 다시 열고 '
@@ -1089,6 +1328,7 @@ def launch(run_loop=True):
                         value['ready'].set()
                     continue
                 if kind == 'log':
+                    track_activity(value)
                     append(value)
                     continue
                 finish(kind, value)
@@ -1105,7 +1345,14 @@ def launch(run_loop=True):
             if view.get('project_name'):
                 project_text.set('{}/{} · {}'.format(view.get('project_index'), view.get('project_total'), view['project_name'])
                                  if view.get('project_total') else view['project_name'])
-            task_text.set(view.get('task') or view.get('stage') or '—')
+            task = view.get('task') or view.get('stage') or '—'
+            if '사진' in task and '조작' in task:
+                # The full warning is already in the yellow notice; here only what is running.
+                stage = (view.get('stage') or '').split(' · ')[0]
+                task = stage if 'GNS3 사진' in stage else (stage + ' · GNS3 사진 저장 중' if stage else 'GNS3 사진 저장 중')
+            task_text.set(task)
+            steps_text.set(project_steps(view.get('stage') or '') if state['running'] else '')
+            activity_text.set(describe_activity() if state['running'] else '')
             time_text.set('경과 {} · 예상 남은 시간 {}'.format(view['elapsed'], view['remaining']))
             if notice_text.get():
                 notice.pack(anchor='w', fill='x', pady=(8, 0), before=tree_frame)
@@ -1123,7 +1370,7 @@ def launch(run_loop=True):
     go(0)
     window.protocol('WM_DELETE_WINDOW', close)
     window.after(100, poll)
-    window._topolog = {'projects': projects, 'output': output, 'rules': rules, 'status': status, 'actions': actions,
+    window._topolog = {'step_labels': step_labels, 'steps_text': steps_text, 'activity_text': activity_text, 'settings_column': settings_column, 'path_labels': path_labels, 'projects': projects, 'output': output, 'rules': rules, 'status': status, 'actions': actions,
                        'state': state, 'stop': stop, 'result': result_button, 'events': events, 'cancel': cancellation,
                        'edit': edit_criteria, 'close': close, 'default_password': default_password, 'allow_enable': allow_enable,
                        'capture': capture, 'retake': retake, 'detail_scope': detail_scope, 'bring_to_front': bring_to_front, 'tracker': tracker,

@@ -67,11 +67,22 @@ class FeatureTests(unittest.TestCase):
             evidence[0]['text']=''
             self.assertEqual(features.evaluate(rule,evidence,'ios')['status'],'failed')
 
-    def test_manual_override_is_retained(self):
-        project=self.project();old=[{'status':'failed','criterion':{'kind':'route'}}]
-        project['nodes'][0]['checks']=copy.deepcopy(old)
-        features.apply(project,{'a':{'checks':[{'kind':'route'}]}})
-        self.assertEqual(project['nodes'][0]['checks'],old)
+    def test_user_checks_are_added_to_automatic_ones_and_switched_off_ones_stay_visible(self):
+        project=self.project()
+        features.apply(project)
+        automatic=[c['criterion'] for c in project['nodes'][0]['checks'] if c.get('criterion')]
+        off,changed=automatic[0],automatic[1]
+        edited=dict(changed,replaces=features.rule_key(changed))
+        added={'kind':'contains','command':'show ip ospf neighbor','expected':['FULL']}
+        features.apply(project,{'a':{'disabled':[features.rule_key(off)],'checks':[edited,added]}})
+        checks=project['nodes'][0]['checks']
+        by=lambda rule:[c for c in checks if c.get('criterion')==rule]
+        self.assertEqual(by(off)[0]['status'],'excluded')
+        self.assertIn('제외', by(off)[0]['reason'])
+        self.assertEqual([c['status'] for c in by(changed)][0],'excluded')       # the automatic copy, replaced
+        user=[c for c in checks if c.get('origin')=='user' and c['status']!='excluded']
+        self.assertEqual(len(user),2)
+        self.assertNotIn('replaces',user[0]['criterion'])
         self.assertTrue(project['nodes'][0]['automatic_checks'])
 
     def test_duplicate_router_ids_are_not_accepted_as_expected_neighbors(self):

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog.resultdir import records as R  # noqa: E402
 from topolog.selection import select,retry_ids
 from topolog.sharing import redact,create

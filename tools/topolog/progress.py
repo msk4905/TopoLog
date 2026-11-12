@@ -1,5 +1,10 @@
 """Concise user-facing progress, with technical details retained in result files."""
 def message(text):
+    # '[R1] Waiting for …' from modules that only prefix the device name: translate the part after the name.
+    if text.startswith('[') and '] ' in text:
+        name,_,rest=text[1:].partition('] ')
+        inner=message(rest)
+        return None if inner is None else '['+name+'] '+inner
     if text.startswith('CLI pagination:'):return None
     for prefix,label in [('Project: ','프로젝트: '),('Node: ','장비: '),('Command: ','수집: '),('Reachability: ','도달성 확인(ping): ')]:
         if text.startswith(prefix):return label+text[len(prefix):]

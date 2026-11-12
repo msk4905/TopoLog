@@ -9,7 +9,7 @@ from .features import LABELS
 STATUS = {'policy_limited':'방화벽 설정 참고','passed':'출력 정리','failed':'수집 실패','inconclusive':'수집 내용 확인',
           'unverified':'원문 참조','collected':'수집 완료','completed':'처리 완료',
           'unsupported':'미지원','requires_privilege':'권한 필요','cancelled':'중지',
-          'not_run':'미실행','not_applicable':'기본 구성','partial':'일부 수집','cleanup_failed':'복구 오류','error':'실행 오류','pending':'대기'}
+          'not_run':'미실행','not_applicable':'기본 구성','partial':'일부 수집','cleanup_failed':'복구 오류','error':'실행 오류','pending':'대기','excluded':'확인 제외'}
 
 
 def esc(value):
@@ -113,15 +113,18 @@ def observation(value):
     if value == []: return '일치하는 항목 없음'
     if isinstance(value,list): return '\n'.join(observation(x) for x in value)
     if isinstance(value,dict):
-        if 'success_percent' in value: return ('ping 성공' if value['success_percent'] >= 40 else ('응답 없음' if value['success_percent']==0 else '확인 보류'))
+        if 'success_percent' in value: return ('ping 성공' if value['success_percent'] >= 40 else ('응답 없음' if value['success_percent']==0 else '확인 필요'))
         return '\n'.join(str(k)+': '+observation(v) for k,v in value.items())
     return str(value)
 
 
 def ping_observation(check):
     value=check.get('observed') or {}
-    label='ping 성공' if check.get('status')=='passed' else ('응답 없음' if value.get('success_percent')==0 else '확인 보류')
-    return label+(' · '+check['reason'] if check.get('reason') else '')
+    label='ping 성공' if check.get('status')=='passed' else ('응답 없음' if value.get('success_percent')==0 else '확인 필요')
+    reason=check.get('reason') or ''
+    if reason.startswith(label):
+        return reason                      # the reason already opens with the same words
+    return label+(' · '+reason if reason else '')
 
 
 CSS = '''
@@ -264,6 +267,10 @@ def render(report, files):
                     actual='관련 설정·원문 참조' if check.get('status')=='unverified' else ping_observation(check) if isinstance(check.get('observed'),dict) and 'success_percent' in check['observed'] else observation(check['observed']) if 'observed' in check else check.get('reason','관측값은 근거 파일을 확인하세요.')
                     if check.get('classification') in SCOPE_NOTES and 'success_percent' not in (check.get('observed') if isinstance(check.get('observed'),dict) else {}):
                         actual+=' · '+check.get('reason','')
+                    if check.get('status')=='excluded':
+                        actual=check.get('reason','사용자가 확인에서 제외했습니다.')
+                    if check.get('origin')=='user':
+                        expected+=' · 사용자 지정'
                     evidence=check.get('evidence');path=here+str(evidence)
                     extra=''.join('<br>'+link(base+'/'+node_dir_of(p,e['node_id'])+'/'+str(e['file']),e.get('label','추가 근거')) for e in check.get('additional_evidence',[]) if e.get('node_id') and e.get('file'))
                     out.append('<tr><td>'+esc(expected)+''+'</td><td class="value">'+esc(actual)+'</td><td>'+(link(path,'보기')+' · '+link(path,'다운로드',True) if evidence else '—')+extra+'</td></tr>')

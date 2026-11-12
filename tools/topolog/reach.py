@@ -24,9 +24,9 @@ from .transport import Console, CLI_ERROR
 
 SHOW_AFTER_TRAFFIC = ('show crypto isakmp sa', 'show crypto ipsec sa')
 # Seconds to wait before each further round of the pings that got no answer.
-RETRY_DELAYS = (5, 10, 20, 30, 45)
+RETRY_DELAYS = (5, 10, 20, 30)
 # Upper limit for those rounds on one device (waits and pings together).
-RETRY_BUDGET = 150
+RETRY_BUDGET = 90
 
 
 def route_command(target):
@@ -146,8 +146,11 @@ def run(api, entry, folder, console_factory=Console, progress=None, cancel=None,
                 still = []
                 for command, rule in pending:
                     result = execute(command, attempt, 'delayed_retry')
-                    if not result['cli_error'] and not answered(rule, record, result):
-                        still.append((command, rule))
+                    if result['cli_error'] or answered(rule, record, result):
+                        continue
+                    # Every ping gets the whole schedule, policy paths included: a ping the policy allows must
+                    # still be seen answering, and a firewall path can come up late.
+                    still.append((command, rule))
                 pending = still
             has_crypto = any(c['command'] in SHOW_AFTER_TRAFFIC for c in record.get('commands', []))
             if platform == 'ios' and has_crypto:

@@ -949,7 +949,7 @@ def _ping(rule, evidence, node):
     diagnostic=(node or {}).get('ping_diagnostics',{}).get(result.get('command'))
     if diagnostic and result.get('status')!='passed':
         from .asa_diagnostics import describe
-        result['reason']=(result.get('reason','')+' '+describe(diagnostic)).strip()
+        result['reason']=(result.get('reason','')+' · '+describe(diagnostic)).strip(' ·')
         result['asa_diagnostic']=diagnostic
         result['additional_evidence']=result.get('additional_evidence',[])+diagnostic.get('evidence',[])
     return result

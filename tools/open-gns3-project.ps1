@@ -112,7 +112,7 @@ try {
     $record['window_at_start']=Get-WindowShape $root
     $record['attempts']=@()
     $record.phase='invoke_action'
-    for($attempt=1;$attempt -le 3 -and -not $dialog;$attempt++) {
+    for($attempt=1;$attempt -le 4 -and -not $dialog;$attempt++) {
         Assert-IdleWindow
         # Right after the previous project closed, UI Automation can fail once with a generic COM error
         # ('Unrecognized error'); that attempt is recorded and the search is repeated.
@@ -128,12 +128,19 @@ try {
         $note=[ordered]@{attempt=$attempt;window=(Get-WindowShape $root);candidates=@($candidates | ForEach-Object {[ordered]@{name=$_.name;type=$_.type;offscreen=$_.offscreen;rect=$_.rect}});source=$null;result=$null}
         foreach($menu in $script:fileMenus) {try {$collapse=$null;if($menu.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$collapse)){$collapse.Collapse()}} catch {}}
         # Attempt 2 always goes through the File menu: a visible button that failed once may be stale.
-        if($visible.Count -gt 0 -and $attempt -ne 2) {
-            $note.source='toolbar or visible menu item'
-            $outcome=Invoke-OpenAction $visible[0].element ('open-action-'+$attempt)
-        } else {
-            $note.source='File menu'
-            $outcome=Invoke-ThroughFileMenu $attempt
+        # The same generic COM error can also come from the menu or button itself; it is recorded and the next attempt runs.
+        try {
+            if($visible.Count -gt 0 -and $attempt -ne 2) {
+                $note.source='toolbar or visible menu item'
+                $outcome=Invoke-OpenAction $visible[0].element ('open-action-'+$attempt)
+            } else {
+                $note.source='File menu'
+                $outcome=Invoke-ThroughFileMenu $attempt
+            }
+        } catch {
+            $outcome='failed: '+$_.Exception.GetBaseException().Message
+            foreach($menu in $script:fileMenus) {try {$collapse=$null;if($menu.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$collapse)){$collapse.Collapse()}} catch {}}
+            Start-Sleep -Milliseconds 800
         }
         $note.result=$outcome
         $record['attempts']+=$note

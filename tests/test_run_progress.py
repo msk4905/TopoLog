@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog.run_progress import RunProgress
 from topolog.engine import Runner
 import test_batch as fixtures
@@ -12,7 +13,7 @@ class ProgressTests(unittest.TestCase):
     def test_monotonic_and_no_100_until_export_finished(self):
         now=[0.];tracker=RunProgress(lambda:now[0])
         self.assertIn('측정 중',tracker.snapshot()['text'])
-        now[0]=20;tracker.update({'fraction':.25,'stage':'장비 수집'})
+        now[0]=20;tracker.update({'fraction':.25,'stage':'장비 수집','project_done':'p1'})
         self.assertEqual(tracker.snapshot()['percent'],25)
         self.assertIn('약 1분',tracker.snapshot()['text'])
         tracker.update({'fraction':.1});self.assertEqual(tracker.snapshot()['percent'],25)
@@ -23,11 +24,19 @@ class ProgressTests(unittest.TestCase):
 
     def test_password_wait_excluded_from_estimate(self):
         now=[0.];tracker=RunProgress(lambda:now[0])
-        now[0]=20;tracker.update({'fraction':.25,'paused':True})
+        now[0]=20;tracker.update({'fraction':.25,'paused':True,'project_done':'p1'})
         now[0]=80;self.assertIn('사용자 입력 대기',tracker.snapshot()['text'])
         tracker.update({'paused':False})
         self.assertEqual(tracker.busy_seconds,20)
         self.assertEqual(tracker.eta,60)
+
+    def test_start_up_time_and_an_unfinished_first_project_do_not_drive_the_estimate(self):
+        now=[0.];tracker=RunProgress(lambda:now[0])
+        now[0]=90;tracker.update({'fraction':0,'stage':'프로젝트 1/4','project_index':1})      # GNS3 and VM start-up took 90 s
+        now[0]=100;tracker.update({'fraction':.1})
+        self.assertIn('측정 중',tracker.snapshot()['text'])                  # first project not finished yet
+        now[0]=130;tracker.update({'fraction':.25,'project_done':'p1'})
+        self.assertAlmostEqual(tracker.eta,40*.75/.25)                     # 40 s of project work, not 130 s
 
     def test_cancel_not_complete_and_restart_resets(self):
         tracker=RunProgress();tracker.update({'fraction':.3});tracker.finish(False)

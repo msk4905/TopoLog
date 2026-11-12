@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog.resultdir import records as R  # noqa: E402
 from topolog import gui
 from topolog.engine import Runner
@@ -36,12 +37,53 @@ class GuiTests(unittest.TestCase):
         self.preflight = patch('topolog.gui.preflight.prepare', return_value={'gui_running': True}).start()
         patch('topolog.gui.preflight.gui_running', return_value=True).start()
         self.errors = patch('topolog.gui.messagebox.showerror').start()
+        self.finished_popup = patch('topolog.gui.messagebox.showinfo').start()   # 'collection finished' after a run
         self.ask_retake = patch('topolog.gui.messagebox.askyesno', return_value=False).start()   # 'save pictures again?' after a run
         self.browser = patch('topolog.gui.webbrowser.open', return_value=True).start()
         patch('topolog.gui.open_report', side_effect=lambda p: gui.webbrowser.open(p.as_uri())).start()
+        self.criteria_file = self.root / 'criteria.json'
+        patch('topolog.criteria_editor.default_path', return_value=self.criteria_file).start()
         self.window = gui.launch(run_loop=False)
         self.window.update_idletasks()
         self.ui = self.window._topolog
+
+    def test_clicking_a_step_in_the_sidebar_opens_that_page(self):
+        labels = self.ui['step_labels']
+        self.window.deiconify()
+        self.window.update()
+        labels[2].event_generate('<Button-1>')
+        self.window.update()
+        self.assertEqual(self.ui['state']['step'], 2)
+        labels[0].event_generate('<Button-1>')
+        self.window.update()
+        self.assertEqual(self.ui['state']['step'], 0)
+
+    def test_tools_window_lists_each_tool_with_its_description(self):
+        self.ui['actions']['tools'].invoke()
+        self.window.update()
+        top = next(w for w in self.window.winfo_children() if hasattr(w, '_topolog_tools'))
+        self.assertEqual(set(top._topolog_tools), {'edit', 'scan', 'reassess', 'regenerate', 'share', 'logs', 'feedback'})
+        top.destroy()
+
+    def test_progress_shows_the_project_step_and_what_each_device_is_doing(self):
+        self.ui['state'].update(running=True, has_run=True)
+        events = self.ui['events']
+        events.put(('progress', {'stage': '프로젝트 1/2 · 장비 1/3 완료 · R1', 'project_index': 1, 'project_total': 2,
+                                 'project_name': 'routing', 'task': '장비 설정 수집 (1/3대 완료)'}))
+        events.put(('log', '[R2] 수집: show ip route'))
+        events.put(('log', '[R3] 장비 응답을 기다리는 중입니다.'))
+        events.put(('log', 'R3: 완료'))
+        deadline = time.monotonic() + 3
+        while '▶ 설정 수집' not in self.ui['steps_text'].get() and time.monotonic() < deadline:
+            self.window.update()
+        self.assertIn('✓ 장비 시작', self.ui['steps_text'].get())
+        self.assertIn('▶ 설정 수집', self.ui['steps_text'].get())
+        self.assertEqual(self.ui['activity_text'].get(), '· R2  show ip route')
+        self.ui['state'].update(running=False)
+
+    def test_project_steps_outside_a_project_are_empty(self):
+        self.assertEqual(gui.project_steps('보고서·Word·ZIP 생성'), '')
+        self.assertTrue(gui.project_steps('프로젝트 처리 완료 1/2').endswith('✓ 정지·저장'))
 
     def tearDown(self):
         self.window.update_idletasks()
@@ -69,7 +111,7 @@ class GuiTests(unittest.TestCase):
             self.ui['actions']['scan'].invoke()
             self.ui['actions']['run'].invoke()
             self.assertTrue(self.ui['state']['running'])
-            self.assertTrue(self.ui['actions']['edit'].instate(['disabled']))
+            self.assertEqual(str(self.ui['actions']['edit'].cget('state')), 'disabled')
             self.finish_worker()
             self.assertTrue(self.ui['actions']['run'].instate(['!disabled']))
             result = self.ui['state']['result']
@@ -385,24 +427,54 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.ui['result'].instate(['!disabled']))
         self.assertIn('완료',self.ui['status'].get())
 
-    def test_edit_node_expectation_and_save_by_name(self):
+    def test_expectation_editor_shows_automatic_checks_and_saving_applies_them(self):
+        with patch('topolog.gui.connect', return_value=FakeAPI()), patch('topolog.gui.prepare_server'), \
+             patch('topolog.gui.Runner', side_effect=self.runner({})):
+            self.ui['actions']['run'].invoke()
+            self.finish_worker()                                    # a result to take the automatic checks from
+        summary = R(self.ui['state']['result']) / 'summary.json'
+        report = json.loads(summary.read_text(encoding='utf-8'))
+        node = next(n for n in report['projects'][0]['nodes'] if n['node_id'] == N)
+        node['automatic_checks'] = [{'criterion': {'kind': 'interface_up', 'command': 'show ip interface brief', 'interface': 'Loopback0'},
+                                     'origin': 'configuration', 'status': 'passed'}]
+        summary.write_text(json.dumps(report), encoding='utf-8')
         dialog = self.ui['edit']()
-        self.assertIsNotNone(dialog)
         dialog.withdraw()
-        editor = dialog._topolog
-        item = next(iter(editor['targets']))
+        editor = dialog._topolog_editor
+        self.assertIn(str(self.ui['state']['result']), editor['state']['source'])
+        item = next(i for i, (pid, nid) in editor['targets'].items() if nid == N)
         editor['tree'].selection_set(item)
-        editor['select']()
-        editor['fields']['neighbors'].set('2.2.2.2')
-        editor['add']()
-        path = self.root/'edited.json'
-        with patch('topolog.criteria_editor.filedialog.asksaveasfilename',return_value=str(path)):
-            editor['save']()
-        self.assertEqual(self.ui['rules'].get(),str(path))
-        saved = json.loads(path.read_text(encoding='utf-8'))
-        self.assertEqual(saved['projects'][P]['nodes'][N]['checks'],
-                         [{'kind':'ospf_neighbors','neighbors':['2.2.2.2']}])
-        self.assertEqual(saved['projects'][P]['nodes'][N]['name'],'R1')
+        editor['show_node']()
+        rows = list(editor['shown'].items())
+        self.assertTrue(rows)                                       # automatic checks are listed
+        first, (key, rule, source) = rows[0]
+        self.assertEqual(source, 'automatic')
+        editor['table'].selection_set(first)
+        editor['toggle']()                                          # switch it off
+        editor['toggle']()                                          # and on again
+        change = editor['edit']()                                   # change its value
+        fields = change._topolog_dialog
+        self.assertIn('interface', fields['inputs'])
+        fields['inputs']['interface'].set('Loopback1')
+        fields['accept']()
+        self.assertEqual([v[2] for v in editor['shown'].values()], ['changed'])
+        add = editor['edit'](True)                                  # add one picked from the candidates
+        fields = add._topolog_dialog
+        fields['kind'].set('Ping 응답')
+        fields['draw'](['target', 'min_percent'], {})
+        fields['inputs']['target'].set('10.0.0.9')
+        fields['accept']()
+        editor['save']()
+        saved = json.loads(self.criteria_file.read_text(encoding='utf-8'))
+        node_rules = saved['projects'][P]['nodes'][N]
+        self.assertEqual(node_rules['disabled'], [])
+        self.assertEqual(node_rules['checks'][0]['interface'], 'Loopback1')
+        self.assertEqual(node_rules['checks'][0]['replaces'], key)
+        self.assertEqual(node_rules['checks'][1], {'kind': 'ping', 'target': '10.0.0.9', 'min_percent': 100.0})
+        self.assertEqual(self.ui['rules'].get(), str(self.criteria_file))   # applied without choosing the file
+        self.ui['go'](4)
+        self.assertIn('사용자 지정 2개', self.ui['summary']['기대값'].get())
+        dialog.destroy()
 
     def test_offline_reassessment_button_never_connects(self):
         source = self.root/'old'
@@ -465,19 +537,23 @@ class GuiTests(unittest.TestCase):
             self.ui['actions']['next'].invoke()
         self.assertEqual(self.ui['state']['step'], 1)
 
-    def test_summary_folder_labels_wrap_across_the_full_row(self):
+    def test_long_folder_paths_are_shortened_in_the_middle_of_the_settings_column(self):
+        long_path = str(self.labs / ('긴폴더이름' * 6) / '중간' / '실습모음')
+        self.window.deiconify()
+        self.window.geometry('960x700')
         self.ui['go'](4)
-        variables = list(self.ui['summary'].values())[:2]
-        def descendants(widget):
-            for child in widget.winfo_children():
-                yield child
-                yield from descendants(child)
-        for variable in variables:
-            labels = [w for w in descendants(self.window)
-                      if 'textvariable' in w.keys() and str(w.cget('textvariable')) == str(variable)]
-            self.assertEqual(len(labels), 1)
-            self.assertEqual(int(labels[0].cget('wraplength')), 680)
-            self.assertEqual(int(labels[0].grid_info()['columnspan']), 3)
+        self.ui['summary']['프로젝트 폴더'].set(long_path)
+        for _ in range(5):
+            self.window.update()
+        label = self.ui['path_labels'][0][0]
+        self.assertIn('…', label.cget('text'))
+        self.assertTrue(label.cget('text').endswith('실습모음'))             # the last folder stays whole
+        self.assertLessEqual(label.winfo_reqwidth(), self.ui['settings_column'].winfo_width())
+
+    def test_shorten_path_keeps_the_drive_and_last_folder(self):
+        measure = lambda text: len(text) * 7
+        self.assertEqual(gui.shorten_path('C:\\a\\b', 500, measure), 'C:\\a\\b')
+        self.assertEqual(gui.shorten_path('C:\\Users\\Administrator\\Desktop\\GNS\\labs', 120, measure), 'C:\\…\\GNS\\labs')
 
     def test_invalid_folder_blocks_the_first_page(self):
         self.ui['projects'].set(str(self.root / 'missing'))
@@ -556,8 +632,10 @@ class GuiTests(unittest.TestCase):
             self.finish_worker()
         files = list((self.root / 'logs').glob('run-*.log'))
         self.assertEqual(len(files), 1)
+        self.finished_popup.assert_called_once()
+        self.assertEqual(self.finished_popup.call_args.args[0], '수집 완료')
         self.assertEqual(len([w for w in self.window.winfo_children()
-                             if isinstance(w, gui.tk.Toplevel)]), 1)
+                             if isinstance(w, gui.tk.Toplevel)]), 0)        # the log window opens only on request
         self.assertIn('결과:', files[0].read_text(encoding='utf-8'))
         self.ui['show_log']()
         self.assertEqual(len([w for w in self.window.winfo_children()

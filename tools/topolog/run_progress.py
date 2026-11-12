@@ -20,6 +20,8 @@ class RunProgress:
         self.busy_seconds=0.;self.eta=None;self.completed=False
         self.finished_elapsed=None
         self.input_paused=self.gate_paused=False
+        # GNS3/VM start-up before the first project is a one-time cost, not a rate to extrapolate from.
+        self.work_started_at=None;self.projects_done=0
 
     def _tick(self):
         now=self.clock()
@@ -37,9 +39,14 @@ class RunProgress:
         if 'gate_paused' in event:self.gate_paused=bool(event['gate_paused'])
         self.paused=getattr(self,'input_paused',False) or getattr(self,'gate_paused',False)
         self.pause_label='일시중지됨' if getattr(self,'gate_paused',False) else '사용자 입력 대기'
-        # Re-estimate at actual milestones, then count down between milestones.
-        self.eta=(self.busy_seconds*(1-self.fraction)/self.fraction
-                  if self.fraction>=.02 and self.busy_seconds>=5 else None)
+        if self.work_started_at is None and 'project_index' in event:self.work_started_at=self.busy_seconds
+        if 'project_done' in event:self.projects_done+=1
+        # Re-estimate at actual milestones, then count down between milestones. Steps inside one project
+        # take very different times (ping retries, picture saving), so the first estimate waits for a
+        # finished project, or for a quarter of the work when there is only one large project.
+        worked=self.busy_seconds-(self.work_started_at or 0)
+        ready=(self.projects_done>=1 or self.fraction>=.25) and worked>=5
+        self.eta=worked*(1-self.fraction)/self.fraction if ready and self.fraction>0 else None
         self.eta_at=self.busy_seconds
 
     def finish(self,completed):
@@ -52,7 +59,7 @@ class RunProgress:
         self._tick();elapsed=self.finished_elapsed if self.finished_elapsed is not None else self.clock()-self.started
         if not self.active:remaining='완료' if self.completed else '중지됨'
         elif self.paused:remaining=getattr(self,'pause_label','사용자 입력 대기')
-        elif self.eta is None:remaining='측정 중'
+        elif self.eta is None:remaining='측정 중(첫 프로젝트가 끝나면 계산)'
         else:
             left=self.eta-(self.busy_seconds-getattr(self,'eta_at',self.busy_seconds))
             remaining='약 '+duration(left) if left>0 else '다음 단계 확인 중'

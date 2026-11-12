@@ -11,6 +11,7 @@ from unittest.mock import patch
 from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+import topolog.engine as _engine; _engine.SERVER_CHECK_INTERVAL = 0   # no real server to wait for
 from topolog import reach, reporting, verify  # noqa: E402
 from topolog.engine import Runner  # noqa: E402
 from topolog.resultdir import RECORDS, records, folder_name  # noqa: E402
@@ -90,7 +91,7 @@ class PictureRetryTests(unittest.TestCase):
 
 
 class StagedPingTests(unittest.TestCase):
-    def ping(self, plans, nodes, answers):
+    def ping(self, plans, nodes, answers, route=True):
         """answers: {node_id: [success percent per ping sent by that node, in order]}"""
         sent = {nid: iter(values) for nid, values in answers.items()}
         class API:
@@ -108,6 +109,8 @@ class StagedPingTests(unittest.TestCase):
                 pass
             def command(self, command):
                 if command.startswith('show ip route'):
+                    if not route:
+                        return '% Network not in table'
                     return 'Routing entry for 10.0.0.0/24\n  Known via "ospf 1", distance 110'
                 nid = next(n for n, rules in plans.items() if any(verify.ping_command(r, 'ios') == command for r in rules))
                 return 'Success rate is {} percent'.format(next(sent[nid]))
@@ -157,6 +160,27 @@ class StagedPingTests(unittest.TestCase):
         entry, waits, _ = self.ping({'a': [rule]}, [a], {'a': [0] * 10})
         self.assertLessEqual(sum(waits), reach.RETRY_BUDGET)
         self.assertEqual(waits, list(reach.RETRY_DELAYS[:len(waits)]))
+
+
+    def test_policy_path_ping_gets_the_whole_schedule_so_an_allowed_ping_is_seen_answering(self):
+        a = self.node('a', 'R1')
+        rule = {'kind': 'ping', 'target': '10.0.0.2', 'policy_context': {'policy': True}}
+        entry, waits, _ = self.ping({'a': [rule]}, [a], {'a': [0, 0, 0, 0, 100]})
+        self.assertEqual(waits, [5, 10, 20, 30])
+        self.assertEqual(verify.evaluate(rule, a['commands'], a)['status'], 'passed')
+
+    def test_report_text_has_no_repeated_label_and_reply_trace_without_session_is_not_called_a_block(self):
+        from topolog.asa_diagnostics import describe
+        check = {'status': 'inconclusive', 'observed': {'success_percent': 0}, 'reason': '응답 없음. 정책 확인 필요'}
+        self.assertEqual(reporting.ping_observation(check), '응답 없음. 정책 확인 필요')
+        text = describe({'status': 'completed', 'request': {'action': 'drop', 'drop_reason': '(acl-drop) Flow is denied by configured rule'},
+                         'reply': {'action': 'drop', 'drop_reason': '(inspect-icmp-seq-num-not-matched) ICMP Inspect seq num not matched'}})
+        self.assertIn('원인: ASA 접근 규칙(ACL)이 요청을 차단함', text)
+        self.assertNotIn('응답 모의 검사', text)                                # a reply without its request says nothing
+        other = describe({'status': 'completed', 'request': {'action': 'allow'},
+                          'reply': {'action': 'drop', 'drop_reason': '(inspect-icmp-seq-num-not-matched) x'}})
+        self.assertIn('ASA 요청 모의 검사: 통과', other)
+        self.assertNotIn('응답 모의 검사', other)
 
 
 class ReadableFolderTests(unittest.TestCase):
