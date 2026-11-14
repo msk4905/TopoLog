@@ -86,6 +86,10 @@ def _expectation(rule):
     if kind=='stp_root': return 'VLAN '+get('vlan')+(' STP Root Bridge 확인' if rule.get('root') else ' STP Root Priority '+get('priority')+' 확인')
     if kind=='vpcs_ip': return 'VPCS 주소 '+get('address')+(' · 게이트웨이 '+get('gateway') if rule.get('gateway') else '')+' 확인'
     if kind=='vlan_active': return 'VLAN '+get('vlan')+' 활성'
+    if kind=='dot1q_vlan': return get('interface')+' 하위 인터페이스 802.1Q VLAN '+get('vlan')+' 확인'
+    if kind=='ppp_link': return get('interface')+' PPP 캡슐화·LCP Open 확인'
+    if kind=='ospf_area_type':
+        return 'OSPF area '+get('area')+' '+('NSSA' if rule.get('type')=='nssa' else 'stub')+(' (no-summary)' if rule.get('no_summary') else '')+' 확인'
     if kind=='trunk': return get('interface')+' · trunking'
     if kind=='hsrp': return get('interface')+' · HSRP '+get('group')+' · '+get('virtual_ip')
     if kind=='dhcp_pool': return 'DHCP 풀 '+get('pool')+' · '+get('network')

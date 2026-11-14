@@ -10,7 +10,7 @@ from . import profiles
 
 DETECTORS = {
     'static': (r'^ip route ', ['show ip route']),
-    'ospf': (r'^router ospf\b', ['show ip ospf neighbor', 'show ip ospf interface brief']),
+    'ospf': (r'^router ospf\b', ['show ip ospf neighbor', 'show ip ospf interface brief', 'show ip ospf']),
     'rip': (r'^router rip\b', ['show ip protocols', 'show ip rip database']),
     'redistribution': (r'^\s+redistribute\b', ['show ip protocols', 'show route-map']),
     'vlan': (r'^(?:vlan \d|\s+switchport access vlan)', ['show vlan brief']),
@@ -22,7 +22,8 @@ DETECTORS = {
     'hsrp': (r'^\s+standby\b', ['show standby brief']),
     # Default ASA lines such as "crypto ca trustpoint" or "crypto ipsec security-association
     # pmtu-aging" are not a VPN; only maps, IKE policies, tunnel groups and tunnels are.
-    'vpn': (r'^(?:crypto map|crypto isakmp|crypto ikev[12] (?:policy|enable)|tunnel-group|interface Tunnel)',
+    # A Tunnel interface is a VPN only with IPsec on it (tunnel protection / tunnel mode ipsec); plain GRE is 'gre'.
+    'vpn': (r'^(?:crypto map|crypto isakmp|crypto ikev[12] (?:policy|enable)|tunnel-group|\s+tunnel protection|\s+tunnel mode ipsec)',
             ['show crypto isakmp sa', 'show crypto ipsec sa', 'show crypto session']),
     'eigrp': (r'^router eigrp\b', ['show ip eigrp neighbors', 'show ip protocols']),
     'isis': (r'^(?:router isis\b|\s+ip router isis)', ['show isis neighbors', 'show clns neighbors', 'show ip protocols']),
@@ -31,13 +32,16 @@ DETECTORS = {
              ['show ipv6 interface brief', 'show ipv6 route', 'show ipv6 protocols']),
     'ssh': (r'^(?:ip ssh\b|ssh \d)', ['show ip ssh']),
     'vtp': (r'^vtp ', ['show vtp status']),
+    'gre': (r'^interface Tunnel', ['show ip interface brief']),
+    'dot1q': (r'^\s+encapsulation dot1Q\b', ['show vlans']),
+    'ppp': (r'^\s+encapsulation ppp\b', []),
 }
 ASA_COMMANDS = {'ospf': ['show ospf neighbor'], 'static': ['show route'], 'ssh': ['show ssh'],
                 'vpn': ['show crypto isakmp sa', 'show crypto ipsec sa']}
 EXTRA_COMMANDS = {'ipv6': {'ospf': 'show ipv6 ospf neighbor', 'eigrp': 'show ipv6 eigrp neighbors', 'isis': 'show isis neighbors'}}
 LABELS = {'static':'정적 경로','ospf':'OSPF','rip':'RIP','redistribution':'재분배','vlan':'VLAN','trunk':'Trunk',
           'stp':'STP','dhcp':'DHCP','nat':'NAT','acl':'ACL','hsrp':'HSRP','vpn':'VPN',
-          'eigrp':'EIGRP','bgp':'BGP','ipv6':'IPv6','isis':'IS-IS','ssh':'SSH','vtp':'VTP',
+          'eigrp':'EIGRP','bgp':'BGP','ipv6':'IPv6','isis':'IS-IS','ssh':'SSH','vtp':'VTP','gre':'GRE 터널','dot1q':'802.1Q 하위 인터페이스','ppp':'PPP',
           'interface':'인터페이스','routing':'경로 학습','reachability':'도달성(ping)','other':'기타 설정'}
 # Management/default lines: preserved as raw configuration, not functions to verify.
 MANAGEMENT = re.compile(r'^(?:upgrade |voice |default-value |username |enable |aaa |banner |alias |ip ssh |ip scp |'
@@ -61,10 +65,37 @@ def interface_key(value):
     return value
 
 
+BANNER = re.compile(r'^banner (?:motd|exec|login|incoming|prompt-timeout|slip-ppp)\s*(\^C|\x03|\S)(.*)$')
+
+
+def strip_banners(config):
+    """Banner and macro bodies are free text: keep their first line, drop the text up to the closing delimiter."""
+    out, closing = [], None
+    for line in config.splitlines(keepends=True):
+        if closing is not None:
+            if (line.strip() == '@') if closing == '@macro' else (closing in line):
+                closing = None
+            continue
+        if line.startswith('macro name '):      # a macro body is command text for later, ended by a lone '@'
+            out.append(line)
+            closing = '@macro'
+            continue
+        match = BANNER.match(line.rstrip('\r\n'))
+        out.append(line)
+        if match:
+            delimiter, rest = match[1], match[2]
+            if delimiter not in rest:            # the text continues on the next lines
+                closing = delimiter
+    return ''.join(out)
+
+
 def analyze(config, platform='ios'):
-    marker = re.search(r'^Current configuration[^\n]*\n', config, re.M)
+    # A console log message can run into the marker line ('…administratively downCurrent configuration : 1598 bytes').
+    marker = re.search(r'Current configuration[^\n]*\n', config)
     if marker: config = config[marker.end():]
     config = re.sub(r'<--- More ---> {0,14}', '', config)   # ASA pager residue
+    raw_config = config
+    config = strip_banners(config)
     found = [name for name, (pattern, _) in DETECTORS.items() if re.search(pattern, config, re.M)]
     interfaces, processes, vlans, hsrp = [], [], set(), []
     current = None
@@ -92,6 +123,9 @@ def analyze(config, platform='ios'):
                     except ValueError:
                         pass
                 if line == 'shutdown': current['shutdown'] = True
+                m = re.fullmatch(r'encapsulation dot1Q (\d+)(?: native)?', line, re.I)
+                if m: current['dot1q'] = int(m[1])
+                if line.lower() == 'encapsulation ppp': current['ppp'] = True
                 if line == 'switchport mode trunk': current['trunk'] = True
                 m = re.fullmatch(r'switchport access vlan (\d+)', line)
                 if m: vlans.add(int(m[1]))
@@ -107,15 +141,18 @@ def analyze(config, platform='ios'):
                 elif line.startswith('passive-interface '): current['passive'].append(interface_key(line.split()[-1]))
                 elif line.startswith('no passive-interface '): current['active'].append(interface_key(line.split()[-1]))
                 if line.startswith('network '): current['networks'].append(line.split()[1:])
+                m = re.fullmatch(r'area (\S+) (stub|nssa)\b(.*)', line)
+                if m and current['protocol'] == 'ospf':
+                    current.setdefault('area_types', {})[m[1]] = {'type': m[2], 'no_summary': 'no-summary' in m[3]}
     baseline = re.compile(r'^(?:no |service |hostname |version |boot-|logging |ip (?:cef|source-route|forward-protocol|tcp |http |domain |icmp )|ipv6 |interface |router |vlan |spanning-tree|access-list|crypto|line |control-plane|archive|memory-size|multilink|voice |mgcp |gatekeeper|upgrade |end$|Building |Current |\w+[>#])')
-    known = re.compile(r'^(?:ip (?:dhcp|nat|access-list|route)|username |enable |aaa )')
+    known = re.compile(r'^(?:ip (?:dhcp|nat|access-list|route|default-gateway)|username |enable |aaa |macro name )')
     other = sorted({line.split()[0] for line in config.splitlines()
                     if line and not line[0].isspace() and not line.startswith(('!', '*'))
                     and not baseline.search(line) and not known.search(line) and not MANAGEMENT.search(line)})
     unsupported_router = re.findall(r'^router (?!ospf\b|rip\b|eigrp\b|bgp\b|isis\b)(\S+)', config, re.M)
     if other or unsupported_router: found.append('other')
     from .services import derive
-    return {'features':list(dict.fromkeys(found)), 'raw':config[:200000], 'interfaces':interfaces,'processes':processes,'service_rules':derive(config),
+    return {'features':list(dict.fromkeys(found)), 'raw':raw_config[:200000], 'interfaces':interfaces,'processes':processes,'service_rules':derive(config),
             'vlans':sorted(vlans),'hsrp':hsrp,'unclassified':other+unsupported_router,'platform':platform,
             'has_static_routes':bool(re.search(r'^ip route ',config,re.M)),
             'stp_disabled':bool(re.search(r'^no spanning-tree vlan ',config,re.M))}
@@ -130,6 +167,8 @@ def commands(analysis):
         for protocol, command in EXTRA_COMMANDS['ipv6'].items():
             if re.search(r'ipv6 (?:router )?' + protocol, analysis.get('raw','')):
                 selected.append(command)
+    if 'ppp' in analysis['features']:
+        selected += ['show interfaces ' + i['name'] for i in analysis.get('interfaces', []) if i.get('ppp') and not i.get('shutdown')]
     return list(dict.fromkeys(selected))
 
 
@@ -186,6 +225,33 @@ def evaluate(rule, evidence, platform):
         rows = [x.split() for x in text.splitlines() if x.split() and interface_key(x.split()[0])==interface_key(rule['interface'])]
         observed = next((x for x in rows if len(x)>6 and x[1]==rule['group']),None)
         passed = bool(observed and rule['virtual_ip'] in observed and any(x.lower() in ('active','standby') for x in observed))
+    elif rule['kind']=='dot1q_vlan':
+        # show vlans: "Virtual LAN ID:  12 (IEEE 802.1Q Encapsulation)" then "vLAN Trunk Interface:   FastEthernet0/0.12"
+        blocks = re.split(r'(?=Virtual LAN ID:)', text)
+        block = next((b for b in blocks if re.search(r'vLAN Trunk Interface:\s*(\S+)', b) and
+                      interface_key(re.search(r'vLAN Trunk Interface:\s*(\S+)', b)[1])==interface_key(rule['interface'])), None)
+        found = re.search(r'Virtual LAN ID:\s*(\d+)', block) if block else None
+        observed = 'VLAN '+found[1] if found else '출력에 없음'
+        passed = bool(found) and int(found[1])==int(rule['vlan'])
+    elif rule['kind']=='ospf_area_type':
+        area = str(rule['area']); dotted = str(ipaddress.IPv4Address(int(area))) if area.isdigit() else area
+        parts = re.split(r'(?=^\s*Area )', text, flags=re.M)
+        block = next((b for b in parts if re.match(r'\s*Area (?:'+re.escape(area)+'|'+re.escape(dotted)+r')\b', b)), None)
+        if not block:
+            observed = '이 area가 출력에 없음'; passed = False
+        else:
+            kind = 'nssa' if re.search(r'It is a NSSA area', block) else ('stub' if re.search(r'It is a stub area', block) else 'normal')
+            no_summary = bool(re.search(r'no summary LSA', block))
+            observed = {'nssa':'NSSA','stub':'stub','normal':'일반 area'}[kind] + (' · summary LSA 없음' if no_summary else '')
+            # IOS prints 'no summary LSA' for a totally stubby area but not for a totally NSSA one,
+            # so for NSSA only the area type can be read from this output.
+            passed = kind==rule['type'] and (rule['type']=='nssa' or no_summary==rule['no_summary'])
+            if passed and rule['type']=='nssa' and rule['no_summary']:
+                observed += ' (no-summary는 이 출력에 표시되지 않아 area 종류만 확인)'
+    elif rule['kind']=='ppp_link':
+        encap = re.search(r'Encapsulation (\S+?),', text); lcp = re.search(r'LCP (\w+)', text)
+        observed = 'Encapsulation '+(encap[1] if encap else '?')+' · LCP '+(lcp[1] if lcp else '?')
+        passed = bool(encap and encap[1].upper()=='PPP' and lcp and lcp[1].lower()=='open')
     else: return {'status':'unverified','reason':'이 기능의 의도·동작 검증은 아직 자동 해석하지 않습니다.'}
     return {'status':'passed' if passed else 'failed','command':command,'evidence':item['file'],'observed':observed}
 
@@ -308,6 +374,19 @@ def apply(project, specifications=None):
                     add({'kind':'trunk','command':'show interfaces trunk','interface':interface['name']},'trunk','명시된 trunk 모드의 운영 상태')
             for vlan in analysis['vlans']:
                 add({'kind':'vlan_active','command':'show vlan brief','vlan':vlan},'vlan','설정에서 요구한 VLAN의 활성 상태')
+            if analysis['platform']=='ios':
+                for interface in analysis['interfaces']:
+                    if interface.get('shutdown'):continue
+                    if interface.get('dot1q') is not None and '.' in interface['name']:
+                        add({'kind':'dot1q_vlan','command':'show vlans','interface':interface['name'],'vlan':interface['dot1q']},
+                            'dot1q','하위 인터페이스에 설정한 802.1Q VLAN 번호와 운영 출력 비교')
+                    if interface.get('ppp'):
+                        add({'kind':'ppp_link','command':'show interfaces '+interface['name'],'interface':interface['name']},
+                            'ppp','PPP 캡슐화와 LCP 협상(Open) 상태')
+                for process in analysis['processes']:
+                    for area,spec in sorted((process.get('area_types') or {}).items()):
+                        add({'kind':'ospf_area_type','command':'show ip ospf','area':area,**spec},'ospf',
+                            '설정한 OSPF area 종류(stub·NSSA, no-summary)와 운영 출력 비교')
             for group in analysis['hsrp']:
                 add({'kind':'hsrp','command':'show standby brief',**group},'hsrp','설정된 가상 IP·그룹과 HSRP 참여 상태')
             expected=[]

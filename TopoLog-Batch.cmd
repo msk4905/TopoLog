@@ -7,7 +7,7 @@ title TopoLog Batch
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0tools\launch-batch.ps1" %*
 if errorlevel 1 (
   echo.
-  echo 실행 결과를 확인하세요. 확인할 항목이 남으면 종료 코드 2로 표시됩니다.
+  echo 실행 중 오류가 있었습니다. 위 기록을 확인하세요.
   pause
 )
 endlocal

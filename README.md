@@ -1,12 +1,12 @@
 # TopoLog
 
-**GNS3 실습 자료 일괄 수집·분류·보고서 생성 도구 · v1.2.0**
+**GNS3 실습 자료 일괄 수집·분류·보고서 생성 도구 · v1.2.1**
 
 프로젝트 폴더를 지정하면 하위 GNS3 프로젝트를 순차적으로 열고 장비를 시작해 설정과 운영 출력을 수집합니다. 토폴로지·설정·실행 출력과 기능별 분류를 HTML·Markdown·Word·ZIP으로 정리합니다. 개인 AI에서 자료를 편집할 프롬프트도 제공합니다.
 
 ## Windows 실행 파일
 
-릴리즈의 `TopoLog-v1.2.0-windows.zip`을 풀고 `TopoLog/TopoLog.exe`를 실행합니다. Python 별도 설치가 필요 없는 휴대용 프로그램입니다. GNS3·VMware·장비 이미지는 기존 설치 환경을 사용하며 프로그램에 포함하지 않습니다. 실행 파일은 서명하지 않았습니다.
+릴리즈의 `TopoLog-v1.2.1-windows.zip`을 풀고 `TopoLog/TopoLog.exe`를 실행합니다. Python 별도 설치가 필요 없는 휴대용 프로그램입니다. GNS3·VMware·장비 이미지는 기존 설치 환경을 사용하며 프로그램에 포함하지 않습니다. 실행 파일은 서명하지 않았습니다.
 
 설정 마법사는 **폴더 → enable 권한 → 토폴로지 사진 → 보고서 상세 범위 → 확인·실행** 순서입니다. 프로젝트 폴더의 기본값은 GNS3 설정의 프로젝트 폴더입니다. GNS3는 시작할 때 기본 프로젝트 폴더의 프로젝트를 등록하고 같은 프로젝트 ID는 하나만 열기 때문에, 폴더를 복사해 만든 프로젝트는 구성을 바꿔도 같은 ID를 가지므로, 기본 폴더나 선택한 폴더 안에 같은 ID의 프로젝트가 있으면 미리 알려 주고 그 프로젝트는 결과 폴더 옆 임시 폴더에 복사해 사본에만 새 ID를 붙여 수집합니다. 원본 프로젝트 파일은 바꾸지 않고, 사본은 수집이 끝나면 GNS3와 디스크에서 지웁니다. 같은 ID의 다른 프로젝트가 GNS3에 열려 있으면 장비가 겹칠 수 있어 수집하지 않습니다. 확인·실행 화면의 프로젝트 목록에서 수집할 프로젝트를 체크로 고릅니다(처음에는 모두 체크). 사진 단계에서 **실제 토폴로지 사진 저장**을 켜면, 저장하지 못한 사진은 모든 프로젝트가 끝난 뒤 한 번 더 저장합니다(끌 수 있음).
 
@@ -22,9 +22,9 @@ v1.1.0부터는 TopoLog가 시작할 때 자체 스크립트의 다운로드 표
 
 TopoLog는 GNS3 사진 저장과 자동 주석에 프로그램에 함께 들어 있는 PowerShell 스크립트를 사용합니다. Windows 설정에 따라 이 스크립트가 막히면 수집은 되지만 GNS3 사진이 하나도 저장되지 않고, 보고서에 "GNS3 자체 캡처 실패. GUI 또는 PowerShell 실행 권한을 확인하세요."가 남습니다. 아래 두 가지를 확인하세요.
 
-1. **ZIP 차단 해제:** 내려받은 `TopoLog-v1.2.0-windows.zip`을 풀기 전에 파일을 마우스 오른쪽 버튼으로 누르고 속성 → 아래쪽 **차단 해제**에 체크한 뒤 확인을 누르고 압축을 풉니다. 이미 풀었다면 PowerShell에서 아래 명령을 실행합니다(경로는 실제로 푼 폴더로 바꿉니다).
+1. **ZIP 차단 해제:** 내려받은 `TopoLog-v1.2.1-windows.zip`을 풀기 전에 파일을 마우스 오른쪽 버튼으로 누르고 속성 → 아래쪽 **차단 해제**에 체크한 뒤 확인을 누르고 압축을 풉니다. 이미 풀었다면 PowerShell에서 아래 명령을 실행합니다(경로는 실제로 푼 폴더로 바꿉니다).
    ```powershell
-   Get-ChildItem "C:\경로\TopoLog-v1.2.0-windows" -Recurse | Unblock-File
+   Get-ChildItem "C:\경로\TopoLog-v1.2.1-windows" -Recurse | Unblock-File
    ```
 2. **PowerShell 실행 정책:** PowerShell에서 `Get-ExecutionPolicy -List`를 실행했을 때 모든 범위가 `Undefined`이거나 `Restricted`이면 스크립트가 실행되지 않습니다. 현재 사용자 범위만 아래처럼 바꿉니다. 관리자 권한은 필요 없습니다.
    ```powershell
@@ -72,17 +72,18 @@ Python 3.10 이상과 tkinter가 필요합니다. 추가 pip 패키지는 필요
 | --- | --- |
 | 인터페이스 | 설정 주소와 운영 출력 비교, GNS3 링크로 연결됐거나 Loopback·Tunnel인 인터페이스의 up/up |
 | 정적 경로 | 설정한 `ip route`·ASA `route`가 라우팅 테이블에 S 경로로 설치됐는지 |
-| OSPF·EIGRP·IS-IS·BGP | 실제 연결·동일 서브넷·프로세스 설정에서 기대 이웃 도출 후 FULL/이웃/UP/Established 확인. ASA OSPF(netmask 형식) 포함 |
+| OSPF·EIGRP·IS-IS·BGP | 실제 연결·동일 서브넷·프로세스 설정에서 기대 이웃 도출 후 FULL/이웃/UP/Established 확인. ASA OSPF(netmask 형식) 포함. OSPF stub·NSSA area는 `show ip ospf`의 area 종류 확인(NSSA no-summary는 IOS가 표시하지 않아 area 종류만 확인) |
 | RIP·경로 학습·재분배 | 같은 라우팅 도메인과 재분배로 연결된 도메인의 원격 대역마다 경로 보유(기본·요약 경로 포함) 확인, 재분배 프로세스 반영 확인 |
 | IPv6 | IPv6 주소, OSPFv3·EIGRPv6 이웃, IPv6 도메인·재분배 기준 원격 대역 경로 |
-| 도달성(ping) | 위 경로가 있어야 하는 원격 장비 주소와 PC 게이트웨이로 2차 콘솔 패스에서 ping. NAT·ACL·방화벽·VPN이 있는 프로젝트의 무응답은 판정 보류 |
-| GRE·IPsec | Tunnel up/up, 터널 목적지 경로, ping 이후 다시 수집한 ISAKMP·IPsec SA |
+| 도달성(ping) | 위 경로가 있어야 하는 원격 장비 주소와 PC 게이트웨이로 2차 콘솔 패스에서 ping. 응답이 없으면 5·10·20·30초 간격으로 다시 확인(장비당 90초 한도). NAT·ACL·방화벽·VPN이 있는 프로젝트의 무응답은 확인 필요로 표시 |
+| GRE·IPsec | Tunnel up/up, 터널 목적지 경로, ping 이후 다시 수집한 ISAKMP·IPsec SA. IPsec 설정이 없는 Tunnel은 VPN이 아닌 GRE 터널로 분류 |
+| 802.1Q·PPP | 하위 인터페이스의 VLAN 번호(`show vlans`)와 부모 포트가 연결된 경우 up/up, PPP 인터페이스의 Encapsulation PPP·LCP Open |
 | NAT·ACL·DHCP | NAT inside/outside 인터페이스 반영, 정적 NAT 매핑, ACL 적용 위치, DHCP 풀 범위 |
 | VLAN·Trunk·STP·VTP·HSRP | VLAN 활성, trunk 상태, 가장 낮은 Priority 스위치의 Root Bridge 선출과 타 스위치의 Root 인식, VTP 모드, HSRP 참여 |
 | SSH | `show ip ssh`로 SSH 활성(RSA 키 포함) 확인 |
 | VPCS·Cloud | VPCS 저장 설정 주소·게이트웨이와 운영 출력 비교, Cloud 등 내장 노드는 API 설정 수집 |
 | ASA | 인터페이스·경로·OSPF 이웃, 페이지 넘김 일시 해제와 복원. 별도 packet-tracer 기준 지원 |
-| 기타 | 해석하지 않는 기능만 원문 보존·미검증. 관리용 설정(사용자·SSH 버전·ASA 기본값 등)은 기능으로 분류하지 않음 |
+| 기타 | 해석하지 않는 기능만 원문 보존·미검증. 관리용 설정(사용자·SSH 버전·ASA 기본값 등)과 banner·macro 본문은 기능으로 분류하지 않음 |
 
 `passed`는 표시한 조건의 충족입니다. DHCP 주소 할당, NAT/ACL 허용·차단 트래픽, STP 최적 루트나 장애 전환, VPN 종단 통신, 재분배 전체 정책까지 자동 보증하지 않습니다. 지원되지 않는 명령·불충분한 증거는 미검증 또는 판정 불가로 기록합니다.
 
@@ -114,7 +115,7 @@ HTML은 외부 CSS/JS나 웹 서버 없이 열 수 있습니다. 프로젝트 �
 
 ## 검증과 개발 상태
 
-v1.2.0 EXE는 단위 시험, PowerShell 구문 검사와 C# 컴파일, 실제 GNS3에서의 사진 저장 확인(보통·좁은 창·최소화 상태)을 모두 통과한 뒤에만 만듭니다(`work/verify-and-build.cmd`). 검사 범위와 실제 실행 기록은 [검증 범위](VALIDATION.md)에 있습니다.
+v1.2.1 EXE는 단위 시험, PowerShell 구문 검사와 C# 컴파일, 실제 GNS3에서의 사진 저장 확인(보통·좁은 창·최소화 상태)을 모두 통과한 뒤에만 만듭니다(`work/verify-and-build.cmd`). 검사 범위와 실제 실행 기록은 [검증 범위](VALIDATION.md)에 있습니다.
 
 장비 시작이 `address already in use`로 실패하면 같은 compute에서 그 포트를 쓰는 열린 프로젝트의 노드를 읽기 전용으로 찾아 보고서에 남깁니다. 포트·프로젝트 파일을 바꾸거나 다른 프로젝트·VM을 멈추지 않습니다.
 

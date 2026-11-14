@@ -37,10 +37,12 @@ def _mask_bits(value):
 
 def parse(config, platform='ios'):
     """Structured view of the parts of a running-config this module verifies."""
-    marker = re.search(r'^(?:Current configuration|: Saved|ASA Version)[^\n]*\n', config, re.M)
+    marker = re.search(r'(?:Current configuration|^: Saved|^ASA Version)[^\n]*\n', config, re.M)
     if marker and platform != 'asa':
         config = config[marker.end():]
     config = re.sub(r'<--- More ---> {0,14}', '', config)
+    from .features import strip_banners
+    config = strip_banners(config)   # banner and macro text is not configuration
     result = {'platform': platform, 'hostname': None, 'interfaces': [], 'processes': [], 'static': [], 'static6': [],
               'redistribute': [], 'crypto_peers': [], 'bgp': [], 'ssh': False, 'nat_inside': [], 'nat_outside': [],
               'pat': False, 'vtp_mode': None, 'stp_priority': {}, 'ipv6_routing': False,
@@ -318,6 +320,13 @@ def derive(project, parsed, linked):
     def add(nid, feature, rule, basis):
         rules[nid].append((feature, rule, basis))
 
+    def live(nid, interface):
+        """An unlinked physical port goes down after keepalives, so its network is not advertised."""
+        if not links:
+            return True        # no GNS3 port data: keep the configured interface
+        k = key(interface['name'])
+        return (nid, k) in links or k.startswith(('lo', 'tu')) or ('.' in k and (nid, k.split('.')[0]) in links)
+
     # Interfaces: status for connected/loopback/tunnel interfaces.
     for nid, cfg in parsed.items():
         commands = _commands(cfg['platform'])
@@ -325,7 +334,8 @@ def derive(project, parsed, linked):
             if interface['shutdown'] or not (interface.get('address') or interface['ipv6']):
                 continue
             k = key(interface['name'])
-            if (nid, k) in links or k.startswith(('lo', 'tu')):
+            # A sub-interface (Fa0/0.12) is up only when its parent port is linked in GNS3.
+            if links and live(nid, interface) or k.startswith(('lo', 'tu')):
                 add(nid, 'interface', {'kind': 'interface_up', 'command': commands['brief'], 'interface': interface['name']},
                     'GNS3 링크로 연결됐거나 Loopback·Tunnel인 설정 인터페이스의 up/up 상태')
             for value in interface['ipv6']:
@@ -452,10 +462,10 @@ def derive(project, parsed, linked):
                         nodes[nid].get('name'), protocol, cfg['redistribute_filters'][(protocol, family, source)])
     origins = {}
     for (nid, protocol), interfaces in vertices.items():
-        items = [(i, ipaddress.IPv4Interface(i['address'])) for i in interfaces if i.get('address')]
+        items = [(i, ipaddress.IPv4Interface(i['address'])) for i in interfaces if i.get('address') and live(nid, i)]
         if any(p == protocol and s == 'connected' and f == 4 for p, f, s in parsed[nid]['redistribute']):
             items += [(i, ipaddress.IPv4Interface(i['address'])) for i in parsed[nid]['interfaces']
-                      if i.get('address') and not i['shutdown']]
+                      if i.get('address') and not i['shutdown'] and live(nid, i)]
         origins[(nid, protocol)] = items
 
     def reaching(target, strict=False, graph=None, skip=None):
@@ -562,6 +572,8 @@ def derive(project, parsed, linked):
                 redistributed_connected = any(p == source[1] and f == 6 and s == 'connected' for p, f, s in parsed[source[0]]['redistribute'])
                 interfaces = v6[source] + ([i for i in parsed[source[0]]['interfaces'] if i['ipv6']] if redistributed_connected else [])
                 for interface in interfaces:
+                    if not live(source[0], interface):
+                        continue
                     for value in interface['ipv6']:
                         value = ipaddress.IPv6Interface(value)
                         if not any(value.ip in network for network in own):

@@ -1,3 +1,16 @@
+# v1.2.1 — 2026-11-14
+
+검출 범위 점검: C:\Users\Administrator\GNS3\projects의 24개 프로젝트(.gns3와 라우터 시작 설정 107개)를 TopoLog 분류 코드로 읽어 잘못 분류되거나 확인이 빠진 곳을 고쳤다(장비 미실행, 원본 읽기만).
+
+- banner·macro 본문: banner(종료 구분자까지)와 macro name(단독 '@'까지)의 본문을 설정 명령으로 읽지 않는다. NM-16ESW 기본 banner 문장이 '기타 설정'으로 잡히던 8개 프로젝트(20260902-1~20260904-1)와 macro가 있던 20260903-5가 해당한다. 원문(raw)은 그대로 보존한다. ip default-gateway도 알려진 설정으로 둔다.
+- GRE 터널: Tunnel 인터페이스만 있으면 VPN으로 분류하던 것을 고쳐 'GRE 터널'로 분류한다. IPsec(crypto map, crypto isakmp, tunnel protection, tunnel mode ipsec)이 있을 때만 VPN이다(20260831-1은 GRE, 20260831-2는 GRE+VPN). 터널 up/up·주소·도착지 경로 확인은 이전과 같다.
+- 802.1Q 하위 인터페이스: encapsulation dot1Q를 분류하고 show vlans로 하위 인터페이스의 VLAN 번호를 확인한다. 부모 포트가 GNS3 링크로 연결돼 있으면 하위 인터페이스 up/up도 확인한다(20260903-3, 20260903-4).
+- PPP: encapsulation ppp 인터페이스마다 show interfaces <인터페이스>로 'Encapsulation PPP'와 'LCP Open'을 확인한다(20260821-1).
+- OSPF stub·NSSA: area stub/nssa(no-summary 포함) 설정을 show ip ospf의 area 종류와 비교한다(20260827-2, 20260828-2). 그 area로 들어오는 경로 종류(O IA 등) 확인은 넣지 않았다. IOS는 totally stubby area에는 'no summary LSA'를 출력하지만 NSSA no-summary에는 출력하지 않아, NSSA는 area 종류만 확인하고 그 사실을 관측값에 적는다(11-14 15:09 실행에서 20260828-2 R4·R8이 이 때문에 실패로 나왔던 것을 고침).
+- running-config 앞부분: 콘솔 로그가 'Current configuration' 줄에 붙어 출력되면 명령 메아리('m' 같은 조각)가 '기타 설정'으로 잡히던 것을 고쳤다(11-14 15:09 실행 20260827-1 R2).
+- 경로 기대값: GNS3 링크가 없는 물리 포트(Serial·Ethernet)의 대역은 다른 라우터의 경로 기대값과 ping 대상에서 뺀다. 연결되지 않은 Serial은 처음에 up/up으로 보이다가 keepalive 뒤 내려가 경로가 광고되지 않기 때문이다(11-14 15:09 실행 20261002-1 R3 Serial1/1의 192.168.34.0/24가 F2·R1에서 실패로 나왔던 것을 고침). Loopback·Tunnel과 링크된 포트의 하위 인터페이스는 이전과 같고, GNS3 포트 자료가 없으면 설정대로 둔다.
+- 명령줄 실행이 끝날 때 출력하던 전체 '판정: 기준 충족/기준 불일치/확인 필요'와 그에 따른 종료 코드 2를 없앴다. 프로젝트 구성의 성공·실패를 TopoLog가 정하지 않도록, 수집이 끝나면 종료 코드 0으로 끝난다. 보고서의 항목별 관측값은 그대로 기록한다. TopoLog-Batch.cmd 안내 문구와 BATCH.md, docs/BATCH_RECOVERY.md 설명도 고쳤다.
+
 # v1.2.0 — 2026-11-11
 
 - 도구 배치: 작은 '도구' 메뉴를 없애고 아래 탐색 줄의 '도구' 버튼으로 여는 도구 창에 한 줄 설명과 함께 '수집 준비'(기대값 편집, 프로젝트 다시 확인)·'기존 결과'(기존 결과 다시 정리, 보고서 다시 만들기, 공개 검토용 사본 만들기)·'기록·문의'(기록 폴더 열기, 피드백 보내기) 묶음으로 보이게 했다. '이전 결과에서 고르기'는 프로젝트 목록 위 버튼으로 옮겼고, 선택 개수 문구는 버튼 줄 위로 올렸다.

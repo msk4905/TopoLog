@@ -131,8 +131,7 @@ def main(argv=None):
             output = new_output(args.output_dir or defaults['output_directory'],'재검토')
             result = reassess(args.reassess, output, args.rules)
             print('보고서:', output / 'index.html')
-            print('판정:', {'passed':'기준 충족','failed':'기준 불일치','inconclusive':'확인 필요'}[result['verdict']])
-            return 0 if result['verdict'] == 'passed' else 2
+            return 0
         root, parent = settings.validate(args.folder or defaults['project_directory'], args.output_dir or defaults['output_directory'])
         # Discover/validate before server startup or changing any project state.
         _, entries = discover(root)
@@ -170,8 +169,7 @@ def main(argv=None):
                         annotate=not args.no_annotate and defaults.get('annotate',True)).run(root)
         print('보고서:', output / 'index.html')
         print('압축 파일:', str(output) + '.zip')
-        print('판정:', {'passed':'기준 충족','failed':'기준 불일치','inconclusive':'확인 필요'}[result['verdict']])
-        return 0 if result['verdict'] == 'passed' else 2
+        return 0
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         parser.exit(1, 'TopoLog: ' + str(exc) + '\n')
 
