@@ -1,0 +1,67 @@
+name: "버그 제보"
+description: "TopoLog의 수집, 분류, 출력 또는 보고서 오류를 알려주세요."
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        TopoLog는 실습의 정답이나 완성도를 평가하기보다 장비의 설정과 실제 운영 출력을 수집합니다.
+        실습 설정 문제와 프로그램 수집 문제를 구분해 작성해 주세요.
+        공개 이슈에는 실제 비밀번호, 세션 쿠키 등 비밀정보를 첨부하지 마세요.
+  - type: dropdown
+    id: area
+    attributes:
+      label: "문제 영역"
+      options:
+        - "명령 선정·호환성"
+        - "명령 실행·오류 감지"
+        - "출력 해석·기능 분류"
+        - "보고서·파일 내보내기"
+        - "GNS3 연동·토폴로지"
+        - "기타"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "TopoLog 버전"
+      placeholder: "예: v1.2.1"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: "장비·실행 환경"
+      placeholder: "예: GNS3 2.2.x, Dynamips Cisco 3660 NM-16ESW"
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: "재현 절차"
+      description: "어떤 프로젝트에서 어떤 순서로 실행하면 문제가 나타나나요?"
+      placeholder: "1. 프로젝트 실행\n2. TopoLog 수집\n3. 장비 출력 확인"
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: "실제 결과"
+      description: "실제 전송된 명령과 출력 또는 누락 내용을 가능하면 그대로 기재해 주세요."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "기대 결과"
+      description: "실습 성공 여부가 아니라 프로그램에 기대하는 수집·기록 동작을 적어 주세요."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: "증빙·로그"
+      description: "가능하면 명령 출력, collection.json의 관련 부분, 재현 가능한 최소 프로젝트 등을 첨부해 주세요."
+  - type: textarea
+    id: notes
+    attributes:
+      label: "추가 정보"
+      description: "특정 장비에만 발생하는지, 다른 장비에서의 비교 결과가 있는지 적어 주세요."

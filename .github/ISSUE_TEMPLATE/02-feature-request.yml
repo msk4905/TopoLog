@@ -1,0 +1,30 @@
+name: "기능 제안"
+description: "TopoLog의 수집·분류·보고서 기능 개선을 제안해 주세요."
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        TopoLog의 범용 수집 목적을 유지하는 제안인지 함께 설명해 주세요.
+        실습 종류나 장비 모델을 불필요하게 제한하는 전제는 피해주세요.
+  - type: textarea
+    id: problem
+    attributes:
+      label: "현재 불편한 점"
+      description: "어떤 상황에서 어떤 정보가 부족하거나 작업이 어려운가요?"
+    validations:
+      required: true
+  - type: textarea
+    id: desired
+    attributes:
+      label: "원하는 동작"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: "수집의 범용성 및 기존 기능에 미치는 영향"
+  - type: textarea
+    id: examples
+    attributes:
+      label: "재현 예시·참고 자료"
