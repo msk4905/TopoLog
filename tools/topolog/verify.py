@@ -655,7 +655,8 @@ def derive(project, parsed, linked):
 def latest(evidence, command):
     items = [x for x in evidence if x['command'] == command]
     item=items[-1] if items else None
-    return item if item and item.get('status')=='collected' and not item.get('cli_error') else None
+    from .command_evidence import usable
+    return item if usable(item) else None
 
 
 def route_rows(text):
@@ -734,6 +735,31 @@ def _same6(a, b):
         return False
 
 
+IPV6_INTERFACE_HEADER = re.compile(r'^\s*(\S+)\s+\[([^/\]]+)/([^\]]+)\]')
+
+
+def ipv6_interfaces(text):
+    """Yield interface names, line states and IPv6 addresses from the brief table."""
+    block = None
+    for line in text.splitlines():
+        header = IPV6_INTERFACE_HEADER.match(line)
+        if header:
+            if block is not None:
+                yield block
+            block = (header[1], (header[2].strip().lower(), header[3].strip().lower()), [])
+        elif block is not None and line[:1].isspace():
+            for field in line.split():
+                try:
+                    block[2].append(ipaddress.IPv6Interface(field).ip)
+                except ValueError:
+                    continue
+        elif block is not None and line.strip():
+            yield block
+            block = None
+    if block is not None:
+        yield block
+
+
 def interface_states(evidence):
     """{(family, interface_key): (status, protocol)} from the latest interface summaries."""
     states = {}
@@ -748,10 +774,8 @@ def interface_states(evidence):
                 states[(4, key(fields[0]))] = (status, fields[-1])
     item = latest(evidence, 'show ipv6 interface brief')
     if item:
-        for line in item['text'].splitlines():
-            m = re.match(r'^(\S+)\s+\[([^/\]]+)/([^\]]+)\]', line)
-            if m:
-                states[(6, key(m[1]))] = (m[2].strip(), m[3].strip())
+        for name, state, _ in ipv6_interfaces(item['text']):
+            states[(6, key(name))] = state
     return states
 
 
@@ -788,7 +812,8 @@ def evaluate(rule, evidence, node=None):
     command = rule['command']
     item = latest(evidence, command)
     if not item:
-        return {'status': 'inconclusive', 'reason': '자동 검증에 필요한 명령 증거가 없습니다.', 'command': command}
+        from . import command_evidence
+        return command_evidence.unavailable(command_evidence.latest(evidence, command), command)
     text = re.sub(r'<--- More ---> {0,14}', '', item['text'])
     base = {'command': command, 'evidence': item['file']}
 
@@ -802,15 +827,14 @@ def evaluate(rule, evidence, node=None):
         status = 'administratively down' if 'administratively' in tail else ' / '.join(row[-2:])
         return done(row[-1].lower() == 'up' and row[-2].lower() == 'up', status)
     if kind == 'ipv6_address':
-        compact = str(ipaddress.IPv6Address(rule['address'])).lower()
-        found = [a.lower() for a in re.findall(r'([0-9A-Fa-f:]+:[0-9A-Fa-f:]*)', text)]
-        normalized = set()
-        for value in found:
-            try:
-                normalized.add(str(ipaddress.IPv6Address(value)))
-            except ValueError:
-                pass
-        return done(compact in normalized, compact if compact in normalized else '주소 없음')
+        address = ipaddress.IPv6Address(rule['address'])
+        interfaces = {key(name): addresses for name, _, addresses in ipv6_interfaces(text)}
+        if not interfaces:
+            return {'status': 'inconclusive', **base, 'reason': 'IPv6 인터페이스 표 형식을 해석하지 못했습니다.'}
+        addresses = interfaces.get(key(rule['interface']))
+        if addresses is None:
+            return done(False, '인터페이스가 출력에 없습니다.')
+        return done(address in addresses, str(address) if address in addresses else '해당 인터페이스에 주소 없음')
     if kind == 'route6_covered':
         address = ipaddress.IPv6Address(rule['address'])
         best = None
@@ -884,16 +908,23 @@ def evaluate(rule, evidence, node=None):
         hit = re.search(r'SSH (Enabled|Disabled)[^\n]*', text)
         return done(bool(hit and hit[1] == 'Enabled'), hit[0] if hit else 'SSH 상태 없음')
     if kind == 'isakmp_sa':
-        row = next((line for line in text.splitlines() if rule['peer'] in line), None)
-        return done(bool(row and re.search(r'QM_IDLE|ACTIVE|MM_ACTIVE', row)), ' '.join(row.split()) if row else 'SA 없음')
+        rows = [line.split() for line in text.splitlines()]
+        matching = [row for row in rows if len(row) >= 3 and rule['peer'] in row[:2]]
+        established = next((row for row in matching if row[2].upper() in ('QM_IDLE', 'MM_ACTIVE')
+                            and not any(word.strip('()').upper() in ('DELETED', 'INACTIVE') for word in row[3:])), None)
+        observed = established or (matching[0] if matching else [])
+        return done(established is not None, ' '.join(observed) if observed else 'SA 없음')
     if kind == 'ipsec_sa':
-        block = re.search(r'current_peer\s+' + re.escape(rule['peer']) + r'.*?(?=current_peer|\Z)', text, re.S)
-        if not block:
-            return done(False, 'SA 없음')
-        spi = re.search(r'(?:inbound|outbound) (?:esp|ah) sas:\s*\n\s*spi:\s*(0x[0-9A-Fa-f]+)', block[0])
-        packets = re.search(r'#pkts encaps:\s*(\d+)', block[0])
-        observed = ('spi ' + spi[1] if spi else 'SA 없음') + (' · encaps ' + packets[1] if packets else '')
-        return done(bool(spi), observed)
+        blocks = re.finditer(r'(?ims)^[ \t]*current_peer[ \t]+(\S+).*?(?=^[ \t]*(?:current_peer\b|interface:)|\Z)', text)
+        for block in blocks:
+            if block[1] != rule['peer']:
+                continue
+            values = re.findall(r'(?im)^\s*(?:inbound|outbound) (?:esp|ah) sas:[ \t]*\n[ \t]*spi:[ \t]*(0x[0-9a-f]+)', block[0])
+            spi = next((value for value in values if int(value, 16) > 0), None)
+            if spi:
+                packets = re.search(r'#pkts encaps:\s*(\d+)', block[0])
+                return done(True, 'spi ' + spi + (' · encaps ' + packets[1] if packets else ''))
+        return done(False, 'SA 없음')
     if kind == 'nat_interfaces':
         def listed(label):
             m = re.search(label + r' interfaces?:\s*\n((?:\s+\S[^\n]*\n?)+)', text, re.I)
@@ -931,8 +962,10 @@ def ping_command(rule, platform):
     target = rule['target']
     if platform == 'vpcs':
         return 'ping ' + target + ' -c 5'
+    if platform == 'asa':
+        return 'ping ' + target
     if ':' in target:
-        return 'ping ipv6 ' + target + ' repeat 5 timeout 1'
+        return 'ping ipv6 ' + str(ipaddress.IPv6Address(target)) + ' repeat 5 timeout 1'
     source=(' source '+str(ipaddress.IPv4Address(rule['source']))) if rule.get('source') else ''
     return 'ping ' + target + source + ' repeat 5 timeout 1'
 

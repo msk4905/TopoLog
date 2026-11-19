@@ -1,0 +1,50 @@
+show spanning-tree
+
+ VLAN1 is executing the ieee compatible Spanning Tree protocol
+  Bridge Identifier has priority 0, address cc05.2a18.0000
+  Configured hello time 2, max age 20, forward delay 15
+  We are the root of the spanning tree
+  Topology change flag set, detected flag set
+  Number of topology changes 1 last change occurred 00:00:28 ago
+          from FastEthernet1/1
+  Times:  hold 1, topology change 35, notification 2
+          hello 2, max age 20, forward delay 15 
+  Timers: hello 1, topology change 18, notification 0, aging 300
+
+ Port 42 (FastEthernet1/1) of VLAN1 is forwarding
+   Port path cost 19, Port priority 128, Port Identifier 128.42.
+   Designated root has priority 0, address cc05.2a18.0000
+   Designated bridge has priority 0, address cc05.2a18.0000
+   Designated port id is 128.42, designated path cost 0
+   Timers: message age 0, forward delay 0, hold 0
+   Number of transitions to forwarding state: 1
+   BPDU: sent 46, received 2
+
+ Port 43 (FastEthernet1/2) of VLAN1 is forwarding
+   Port path cost 19, Port priority 128, Port Identifier 128.43.
+   Designated root has priority 0, address cc05.2a18.0000
+   Designated bridge has priority 0, address cc05.2a18.0000
+   Designated port id is 128.43, designated path cost 0
+   Timers: message age 0, forward delay 0, hold 0
+   Number of transitions to forwarding state: 1
+   BPDU: sent 47, received 2
+
+ Port 44 (FastEthernet1/3) of VLAN1 is forwarding
+   Port path cost 19, Port priority 128, Port Identifier 128.44.
+   Designated root has priority 0, address cc05.2a18.0000
+   Designated bridge has priority 0, address cc05.2a18.0000
+   Designated port id is 128.44, designated path cost 0, Topology change is set
+   Timers: message age 0, forward delay 0, hold 0
+   Number of transitions to forwarding state: 1
+   BPDU: sent 49, received 3
+
+ Port 45 (FastEthernet1/4) of VLAN1 is forwarding
+   Port path cost 19, Port priority 128, Port Identifier 128.45.
+   Designated root has priority 0, address cc05.2a18.0000
+   Designated bridge has priority 0, address cc05.2a18.0000
+   Designated port id is 128.45, designated path cost 0
+   Timers: message age 0, forward delay 0, hold 0
+   Number of transitions to forwarding state: 1
+   BPDU: sent 48, received 1
+
+ESW5#

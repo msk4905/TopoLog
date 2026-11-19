@@ -139,7 +139,25 @@ class ServerConfigTests(unittest.TestCase):
                 self.run_prepare(Path(temp), nodes, {'local': True})
             self.assertIn('Dynamips', str(caught.exception))
             self.assertIn('VPCS', str(caught.exception))
+            self.assertIn('로컬 서버가 준비되면', str(caught.exception))
+            self.assertNotIn('VM 연결이 준비되면', str(caught.exception))
             self.assertEqual(len(list(Path(temp).glob('*.bak'))), 2)
+
+    def test_helper_restart_mentions_vm_only_for_selected_vm_nodes(self):
+        for vm_status in ('pending', 'excluded'):
+            with self.subTest(vm_status=vm_status), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                server, helper, config = self.fixture(root, b'[Server]\nport=3080\n')
+                local = root / 'local.gns3'
+                local.write_text(json.dumps({'topology': {'nodes': [{'node_type': 'dynamips', 'compute_id': 'local'}]}}))
+                vm = root / 'vm.gns3'
+                vm.write_text(json.dumps({'topology': {'nodes': [{'node_type': 'qemu', 'compute_id': 'vm'}]}}))
+                entries = [{'file': local.name, 'status': 'pending'}, {'file': vm.name, 'status': vm_status}]
+                api = self.local_api({'local': True})
+                with patch('topolog.transport.API', return_value=api), patch('topolog.server_config.backend.discover', return_value=({'localhost'}, [server])):
+                    with self.assertRaises(RestartRequired) as caught:
+                        prepare(api, root, entries, config_path=config)
+                self.assertEqual('VM 연결이 준비되면' in str(caught.exception), vm_status == 'pending')
 
     def test_non_local_server_with_outside_absolute_image_requires_restart(self):
         with tempfile.TemporaryDirectory() as temp:

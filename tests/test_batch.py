@@ -276,7 +276,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_echo_and_cli_errors_do_not_pass(self):
         rule = {'kind': 'contains', 'command': 'show ip route', 'expected': ['show ip route']}
-        self.assertEqual(profiles.evaluate(rule, self.evidence(rule['command'], 'R1#show ip route\nR1#'), 'ios')['status'], 'failed')
+        self.assertEqual(profiles.evaluate(rule, self.evidence(rule['command'], 'R1#show ip route\nR1#'), 'ios')['status'], 'inconclusive')
         self.assertEqual(profiles.evaluate(rule, self.evidence(rule['command'], 'show ip route', True), 'ios')['status'], 'inconclusive')
         with self.assertRaises(ValueError):
             profiles.command_for({**rule, 'command': 'reload'}, 'ios')

@@ -1,6 +1,7 @@
 """Device drivers and explicit verification criteria are separate concepts."""
 import ipaddress
 import re
+from . import command_evidence
 
 PROFILES = {'common', 'ospf', 'rip', 'redistribution', 'asa'}
 COMMANDS = {
@@ -83,17 +84,16 @@ def command_for(rule, os_type):
             raise ValueError('No supported driver for ' + kind)
         return command
     if kind == 'ping':
-        address = _ipv4(rule['target'])
+        address = ipaddress.ip_address(rule['target'])
         minimum = rule.get('min_percent', 100)
         if isinstance(minimum, bool) or not isinstance(minimum, (int, float)) or not 1 <= minimum <= 100:
             raise ValueError('min_percent must be 1..100')
-        if os_type == 'vpcs':
-            return 'ping ' + address + ' -c 5'
-        if os_type == 'asa':
-            return 'ping ' + address
-        if os_type == 'ios':
-            return 'ping ' + address + ' repeat 5 timeout 1'
-        raise ValueError('No supported Ping driver')
+        if os_type not in ('ios', 'asa', 'vpcs') or (address.version == 6 and os_type != 'ios'):
+            raise ValueError('No supported Ping driver for this address family')
+        if getattr(address, 'scope_id', None) is not None:
+            raise ValueError('Scoped IPv6 addresses are not supported in ping rules')
+        from .verify import ping_command
+        return ping_command({**rule, 'target': str(address)}, os_type)
     if kind == 'ospf_neighbors':
         expected = rule.get('neighbors')
         if not isinstance(expected, list) or not expected:
@@ -191,8 +191,8 @@ def evaluate(rule, evidence, os_type):
     except (ValueError, TypeError, KeyError) as exc:
         return {'status': 'inconclusive', 'reason': str(exc)}
     item = next((x for x in reversed(evidence) if x['command'] == command), None)
-    if not item or item['status'] != 'collected' or item.get('cli_error'):
-        return {'status': 'inconclusive', 'reason': 'Complete error-free evidence unavailable', 'command': command}
+    if not command_evidence.usable(item):
+        return command_evidence.unavailable(item, command)
     text = body(item['text'], command)
     kind = rule['kind']
     if kind == 'contains':

@@ -48,10 +48,10 @@ def folder_link(path, label):
     return '<a class="folder" href="./'+quote(path, safe='/')+'/">'+esc(label)+'</a>'
 
 
-def expectation(rule):
+def expectation(rule, observed_command=None):
     """What was checked, as a sentence, with the command whose output it was read from."""
     text = _expectation(rule or {})
-    command = (rule or {}).get('command')
+    command = observed_command or (rule or {}).get('command')
     return text + (' (' + command + ')' if command and command not in text else '')
 
 
@@ -267,7 +267,7 @@ def render(report, files):
             if checks:
                 out.append('<div class="scroll"><table class="checks"><thead><tr><th>설정·확인 내용</th><th>수집 출력 요약</th><th>근거</th></tr></thead><tbody>')
                 for check in checks:
-                    rule=check.get('criterion',{});expected=expectation(rule) if rule else LABELS.get(check.get('feature'), '수집 내용')
+                    rule=check.get('criterion',{});expected=expectation(rule, check.get('command')) if rule else LABELS.get(check.get('feature'), '수집 내용')
                     actual='관련 설정·원문 참조' if check.get('status')=='unverified' else ping_observation(check) if isinstance(check.get('observed'),dict) and 'success_percent' in check['observed'] else observation(check['observed']) if 'observed' in check else check.get('reason','관측값은 근거 파일을 확인하세요.')
                     if check.get('classification') in SCOPE_NOTES and 'success_percent' not in (check.get('observed') if isinstance(check.get('observed'),dict) else {}):
                         actual+=' · '+check.get('reason','')

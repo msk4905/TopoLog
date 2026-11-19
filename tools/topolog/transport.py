@@ -11,11 +11,13 @@ import urllib.request
 import urllib.parse
 
 PROMPT = re.compile(r'(?m)^([\w.:/-]+[>#])\s*\Z')
-CLI_ERROR = re.compile(r'(?im)^\s*(?:%\s*(?:Invalid|Ambiguous|Incomplete|Authorization|Unrecognized|Error)|ERROR:|Unknown command|Invalid command)')
+CLI_ERROR = re.compile(r'(?im)^\s*(?:%\s*(?:Invalid|Ambiguous|Incomplete|Authorization|Unrecognized|Unknown|Unsupported|Not supported|Command[^\r\n]*not supported|Error)|ERROR:|Unknown command|Invalid command|Command not supported|Syntax error|Permission denied)')
 PAGER = re.compile(r'--More--|<---\s*More\s*--->')
 # A pager prompt still at the end of the visible screen: the device has not
 # consumed the key yet (IOS erases --More-- with backspaces once it reads it).
 PAGER_WAITING = re.compile(r'(?:--More--|<---\s*More\s*--->)\s*\Z')
+HTTP_TIMEOUT = 20
+PROJECT_OPEN_TIMEOUT = 180
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -55,7 +57,11 @@ class API:
             headers['Content-Type'] = 'application/json'
             data = b'{}'
         request = urllib.request.Request(self.base + path, data=data, headers=headers, method=method)
-        with self.opener.open(request, timeout=20) as response:
+        opening = ((method == 'POST' and (path == '/v2/projects/load' or
+                    re.fullmatch(r'/v2/projects/[^/]+/(?:open|close)', path))) or
+                   (method == 'DELETE' and re.fullmatch(r'/v2/projects/[^/]+', path)))
+        timeout = PROJECT_OPEN_TIMEOUT if opening else HTTP_TIMEOUT
+        with self.opener.open(request, timeout=timeout) as response:
             return response.read()
 
     def call(self, path, method='GET', body=None):

@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 from . import profiles
+from . import command_evidence
 
 DETECTORS = {
     'static': (r'^ip route ', ['show ip route']),
@@ -163,6 +164,12 @@ def commands(analysis):
         return list(dict.fromkeys(cmd for feature in analysis['features'] for cmd in ASA_COMMANDS.get(feature, [])))
     if analysis['platform'] != 'ios': return []
     selected = [cmd for feature in analysis['features'] if feature in DETECTORS for cmd in DETECTORS[feature][1]]
+    # Default STP and the VLAN database need not appear in running-config.
+    # Probe switching operations when configuration shows switching capability;
+    # unsupported replies remain evidence, never a failed network exercise.
+    if (set(analysis['features']) & {'vlan', 'trunk', 'stp', 'vtp'} or
+            re.search(r'(?im)^\s+switchport\b|^interface Vlan\d+\b', analysis.get('raw', ''))):
+        selected += ['show vlan brief', 'show spanning-tree']
     if 'ipv6' in analysis['features']:
         for protocol, command in EXTRA_COMMANDS['ipv6'].items():
             if re.search(r'ipv6 (?:router )?' + protocol, analysis.get('raw','')):
@@ -202,8 +209,10 @@ def evaluate(rule, evidence, platform):
     if rule['kind'] in ('ospf_neighbors','route','ping','contains'):
         return profiles.evaluate(rule,evidence,platform)
     command = rule['command']
-    item = next((x for x in reversed(evidence) if x['command']==command),None)
-    if not item or item.get('status')!='collected' or item.get('cli_error'): return {'status':'inconclusive','reason':'자동 검증에 필요한 명령 증거가 없습니다.','command':command}
+    item = command_evidence.latest(evidence, command, vlan_equivalent=rule['kind']=='vlan_active' and platform=='ios')
+    if not command_evidence.usable(item):
+        return command_evidence.unavailable(item, command)
+    command = item['command']
     text = profiles.body(item['text'],command)
     observed = None
     if rule['kind'] in ('dhcp_pool','static_nat','acl_binding','stp_instance'):

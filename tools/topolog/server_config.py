@@ -109,11 +109,14 @@ def prepare(api, root, entries, executable=None, progress=None, config_path=None
     import json
     from .transport import API
     needs, absolute_images = set(), []
+    needs_vm = False
     for entry in entries:
         if entry.get('status') != 'pending':
             continue
         data = json.loads((Path(root) / entry['file']).read_text(encoding='utf-8-sig'))
         for node in data.get('topology', {}).get('nodes', []):
+            if node.get('compute_id') == 'vm':
+                needs_vm = True
             if (node.get('compute_id') or 'local') != 'local':
                 continue
             if node.get('node_type') == 'dynamips':
@@ -172,8 +175,12 @@ def prepare(api, root, entries, executable=None, progress=None, config_path=None
                      '이 상태에서는 images 폴더 밖 절대 경로 IOS 이미지를 쓰는 프로젝트를 열 수 없습니다 '
                      '({}개 노드, 예: {} / {} / {}). GNS3 GUI가 직접 띄운 서버는 --local로 실행되지만, '
                      '다른 방식으로 먼저 실행된 gns3server.exe는 GUI가 종료·교체하지 않습니다.'.format(len(blocked), *sample))
-    lines.append('GNS3를 완전히 종료하고 작업 관리자에서 gns3server.exe가 남아 있지 않은지 확인한 뒤 GNS3를 다시 켜 주세요. '
-                 'GNS3 VM 연결이 준비되면 TopoLog에서 다시 수집하세요. 프로젝트 파일과 수동 경로 편집은 필요 없습니다.')
+    lines.append('GNS3를 완전히 종료하고 작업 관리자에서 gns3server.exe가 남아 있지 않은지 확인한 뒤 GNS3를 다시 켜 주세요.')
+    if needs_vm:
+        lines.append('선택한 프로젝트의 GNS3 VM 연결이 준비되면 TopoLog에서 다시 수집하세요.')
+    else:
+        lines.append('로컬 서버가 준비되면 TopoLog에서 다시 수집하세요. 선택한 프로젝트에는 GNS3 VM이 필요하지 않습니다.')
+    lines.append('프로젝트 파일과 수동 경로 편집은 필요 없습니다.')
     for label, helper, backup in repaired:
         lines.append('원본 설정 백업({}): {}'.format(label, backup))
     message = '\n'.join(lines)

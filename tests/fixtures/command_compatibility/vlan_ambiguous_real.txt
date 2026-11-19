@@ -1,0 +1,3 @@
+show vlan brief
+% Ambiguous command:  "show vlan brief"
+ESW2#

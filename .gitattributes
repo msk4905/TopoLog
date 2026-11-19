@@ -1,0 +1,2 @@
+# Preserve saved console evidence exactly across Windows and Unix checkouts.
+tests/fixtures/command_compatibility/*.txt -text -whitespace

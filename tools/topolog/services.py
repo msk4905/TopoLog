@@ -46,9 +46,21 @@ def evaluate(rule,text):
         block=re.search(r'(?ims)^'+re.escape(rule['interface'])+r' is .*?(?=^\S+ is |\Z)',text)
         if not block:return None,'인터페이스 상세 증거가 없습니다.'
         label='Inbound' if rule['direction']=='in' else 'Outgoing'
-        acl=re.search(label+r' access list is (\S+)',block[0],re.I)
+        acl=re.search(r'(?im)^\s*'+label+r'\s+access\s+list\s+is\s+(\S+)',block[0])
         return (acl[1]==rule['acl'] if acl else None),acl[1] if acl else 'ACL 적용 위치를 해석하지 못했습니다.'
     if kind=='stp_instance':
-        block=re.search(r'(?ims)^VLAN0*'+str(rule['vlan'])+r'\s*(.*?)(?=^VLAN\d|\Z)',text)
-        return bool(block and 'Root ID' in block[1] and 'Bridge ID' in block[1]),'VLAN '+str(rule['vlan'])+' STP 인스턴스'
+        headers = list(re.finditer(r'(?im)^[ \t]*VLAN0*(\d+)\b([ \t][^\n\r]*)?\s*$', text))
+        active = set()
+        for index, header in enumerate(headers):
+            end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+            block = text[header.end():end]
+            if (re.search(r'\bis executing\b.*\bspanning tree protocol\b', header[2] or '', re.I)
+                    or re.search(r'\bRoot ID\b', block, re.I) and re.search(r'\bBridge ID\b', block, re.I)):
+                active.add(int(header[1]))
+        vlan = int(rule['vlan'])
+        if vlan in active:
+            return True, 'VLAN {} STP 인스턴스 활성'.format(vlan)
+        if active or re.search(r'(?im)^\s*%?\s*No spanning tree instance exists\.?\s*$', text):
+            return False, 'VLAN {} STP 인스턴스 없음'.format(vlan)
+        return None, 'STP 인스턴스 출력 형식을 해석하지 못했습니다.'
     return None,'지원하지 않는 자동 조건'

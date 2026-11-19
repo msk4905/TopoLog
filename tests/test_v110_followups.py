@@ -275,11 +275,22 @@ class TemporaryCopyTests(unittest.TestCase):
 
     def api(self, registered):
         from test_batch import FakeAPI as Base
+        controller_root = self.root / 'controller-store'
         class API(Base):
             def __init__(self):
                 super().__init__()
-                self.loaded, self.deleted = {}, []
+                self.loaded, self.deleted, self.loaded_names = {}, [], {}
+                self.storage_root = controller_root
             def call(self, path, method='GET', body=None):
+                if path == '/v2/projects' and method == 'POST':
+                    self.calls.append((path,method,body))
+                    folder=self.storage_root/body['project_id']
+                    folder.mkdir(parents=True)
+                    filename=body['name']+'.gns3'
+                    (folder/filename).write_text(json.dumps({'project_id':body['project_id'],'name':body['name'],'topology':{'nodes':[]}}),encoding='utf-8')
+                    self.loaded[body['project_id']]=str(folder)
+                    self.loaded_names[body['project_id']]=body['name']
+                    return {'project_id':body['project_id'],'name':body['name'],'path':str(folder),'filename':filename}
                 if path == '/v2/projects' and method == 'GET':
                     self.calls.append((path, method, body))
                     return registered
@@ -288,17 +299,22 @@ class TemporaryCopyTests(unittest.TestCase):
                     return None
                 if path == '/v2/projects/load':
                     self.calls.append((path, method, body))
-                    pid = json.loads(Path(body['path']).read_text(encoding='utf-8'))['project_id']
+                    copied = json.loads(Path(body['path']).read_text(encoding='utf-8'))
+                    if copied.get('name') in [p.get('name') for p in registered]:
+                        raise ValueError('GNS3 rejects a duplicate project name even when the ID is new')
+                    pid = copied['project_id']
                     self.loaded[pid] = str(Path(body['path']).parent)
+                    self.loaded_names[pid] = copied.get('name')
                     return {'project_id': pid}
                 for pid, folder in self.loaded.items():
                     prefix = '/v2/projects/' + pid
                     if path == prefix and method == 'GET':
                         self.calls.append((path, method, body))
-                        return {'project_id': pid, 'name': 'routing', 'path': folder}
+                        return {'project_id': pid, 'name': self.loaded_names[pid], 'path': folder}
                     if path == prefix and method == 'DELETE':
                         self.calls.append((path, method, body))
                         self.deleted.append(pid)
+                        if Path(folder).is_dir():shutil.rmtree(folder)
                         return None
                     if path.startswith(prefix + '/'):
                         self.calls.append((path, method, body))
@@ -328,7 +344,7 @@ class TemporaryCopyTests(unittest.TestCase):
         self.assertFalse((self.root / 'out_임시사본').exists())
         self.assertEqual(self.originals(), before)                                # user's files untouched
         loads = [c for c in api.calls if c[0] == '/v2/projects/load']
-        self.assertTrue(loads[0][2]['path'].startswith(str(self.root / 'out_임시사본')))
+        self.assertTrue(loads[0][2]['path'].startswith(str(api.storage_root)))
         self.assertTrue(any(c[0].startswith('/v2/projects/' + copy['project_id'] + '/nodes') for c in api.calls))
         html = (self.root / 'out' / 'index.html').read_text(encoding='utf-8')
         self.assertIn('임시 사본(새 ID)으로 열어 수집했습니다', html)
@@ -346,6 +362,52 @@ class TemporaryCopyTests(unittest.TestCase):
         self.assertEqual(second['source_project_id'], P)
         self.assertNotEqual(second['project_id'], P)
 
+    def test_controller_copy_name_is_unique_and_report_keeps_the_original_name(self):
+        folder = self.labs / 'routing'
+        folder.mkdir()
+        project(folder, 'routing', P)
+        before = self.originals()
+        api = self.api([{'project_id':P,'name':'routing','path':'C:/different/routing','status':'closed'}])
+        report = Runner(api,self.root/'out',collector=collected,settle_seconds=0).run(self.labs)
+        entry = report['projects'][0]
+        self.assertEqual(entry['status'],'completed')
+        self.assertEqual(entry['name'],'routing')
+        name = api.loaded_names[entry['gns3_copy']['project_id']]
+        self.assertNotEqual(name,'routing')
+        self.assertIn(entry['gns3_copy']['project_id'],name)
+        self.assertEqual(self.originals(),before)
+
+    def test_mismatched_ownership_marker_prevents_any_delete_request(self):
+        from topolog import projectcopy
+        from unittest.mock import Mock
+        target=self.root/'unowned';target.mkdir()
+        (target/projectcopy.PROJECT_MARKER).write_text(json.dumps({'project_id':P}),encoding='utf-8')
+        api=Mock()
+        with self.assertRaises(ValueError):
+            projectcopy.delete_controller_copy(api,{'path':str(target/'project.gns3'),'project_id':'different-id'})
+        api.call.assert_not_called()
+        self.assertTrue(target.is_dir())
+
+    def test_changed_controller_path_prevents_deleting_an_existing_project(self):
+        from topolog import projectcopy
+        from unittest.mock import Mock
+        target=self.root/'owned';target.mkdir()
+        (target/projectcopy.PROJECT_MARKER).write_text(json.dumps({'project_id':P}),encoding='utf-8')
+        api=Mock();api.call.return_value={'path':str(self.labs)}
+        with self.assertRaises(ValueError):
+            projectcopy.delete_controller_copy(api,{'path':str(target/'project.gns3'),'project_id':P})
+        api.call.assert_called_once_with('/v2/projects/'+P)
+        self.assertTrue(self.labs.is_dir())
+
+    def test_failed_controller_cleanup_is_not_recorded_as_removed(self):
+        entry={'name':'routing','gns3_copy':{'project_id':P,'path':str(self.root/'copy/project.gns3'),'storage':'controller'}}
+        report={}
+        with patch('topolog.projectcopy.delete_controller_copy',side_effect=ValueError('ownership changed')):
+            Runner(self.api([]),self.root/'out')._remove_copies([entry],report)
+        self.assertFalse(entry['gns3_copy']['removed'])
+        self.assertFalse(report['temporary_copies']['removed'])
+        self.assertEqual(len(report['temporary_copies']['errors']),1)
+
     def test_other_copy_open_in_gns3_is_not_collected(self):
         project(self.labs, 'routing', P)
         api = self.api([{'project_id': P, 'name': 'routing', 'path': 'C:/elsewhere/routing', 'status': 'opened'}])
@@ -361,6 +423,8 @@ class TemporaryCopyTests(unittest.TestCase):
             report = Runner(api, self.root / 'out', collector=collected, settle_seconds=0).run(self.labs)
         self.assertIn('공간이 부족', report['projects'][0]['reason'])
         self.assertFalse((self.root / 'out_임시사본').exists())
+        self.assertFalse([c for c in api.calls if c[0]=='/v2/projects/load'])
+        self.assertEqual(list(api.storage_root.iterdir()),[])
 
     def test_picture_of_a_copied_project_is_retaken_from_a_new_copy(self):
         folder = self.labs / 'routing'
@@ -370,7 +434,7 @@ class TemporaryCopyTests(unittest.TestCase):
         outcomes = iter([{'status': 'unavailable', 'reason': 'fixture'}, 'captured'])
         def capture(name, project_file, destination, cancel=None):
             outcome = next(outcomes)
-            self.assertTrue(str(project_file).startswith(str(self.root / 'out_임시사본')))   # always a copy, never the original
+            self.assertTrue(str(project_file).startswith(str(api.storage_root)))   # always a controller-owned copy
             if outcome == 'captured':
                 return fake_capture(name, project_file, destination, cancel)
             Path(destination).mkdir(parents=True)

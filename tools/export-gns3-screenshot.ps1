@@ -173,9 +173,17 @@ try {
             Assert-TargetWindow
             $dialogs=@(Find-ScreenshotDialogs)
             if($dialogs.Count -eq 1) {$ownedDialog=$dialogs[0];break}
-            $rootElement=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
-            $fresh=Find-ScreenshotAction $rootElement
-            if(-not $fresh) {foreach($processRoot in (Get-ProcessRoots)) {$fresh=Find-ScreenshotAction $processRoot;if($fresh){break}}}
+            if($dialogs.Count -gt 1) {throw 'Multiple Screenshot save dialogs are visible.'}
+            try {
+                $rootElement=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$WindowHandle)
+                $fresh=Find-ScreenshotAction $rootElement
+                if(-not $fresh) {foreach($processRoot in (Get-ProcessRoots)) {$fresh=Find-ScreenshotAction $processRoot;if($fresh){break}}}
+            } catch {
+                $lastInvokeError=$_.Exception.GetBaseException().Message
+                $record['invoke_attempts']+=[ordered]@{attempt=$invokeAttempt;error=$lastInvokeError;result='action lookup failed'}
+                if($invokeAttempt -ge 3) {throw}
+                continue
+            }
             if(-not $fresh) {throw $lastInvokeError}
             $action=$fresh
         }
@@ -202,7 +210,7 @@ try {
         $outcome='dialog';if(-not $ownedDialog){$outcome='no dialog'}
         $record['invoke_attempts']+=[ordered]@{attempt=$invokeAttempt;error=$lastInvokeError;result=$outcome}
         if(-not $ownedDialog -and -not $lastInvokeError) {throw 'The GNS3 Screenshot save dialog did not appear.'}
-        $transient=$lastInvokeError -match '인식할 수 없는 오류|Unspecified error|0x80004005|no longer available'
+        $transient=$lastInvokeError -match '인식할 수 없는 오류|Unspecified error|0x80004005|no longer available|Could not open the process token|프로세스 토큰을 열 수 없'
         if(-not $ownedDialog -and -not $transient) {throw $lastInvokeError}
     }
     if(-not $ownedDialog) {throw $lastInvokeError}

@@ -65,7 +65,8 @@ class FeatureTests(unittest.TestCase):
             evidence=[{'command':rule['command'],'status':'collected','file':'x.txt','text':text}]
             self.assertEqual(features.evaluate(rule,evidence,'ios')['status'],'passed')
             evidence[0]['text']=''
-            self.assertEqual(features.evaluate(rule,evidence,'ios')['status'],'failed')
+            # An empty response contains no operational evidence of absence.
+            self.assertEqual(features.evaluate(rule,evidence,'ios')['status'],'inconclusive')
 
     def test_user_checks_are_added_to_automatic_ones_and_switched_off_ones_stay_visible(self):
         project=self.project()

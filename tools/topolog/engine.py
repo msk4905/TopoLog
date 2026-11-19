@@ -11,7 +11,6 @@ import shutil
 import uuid
 from urllib.error import HTTPError
 import zipfile
-from urllib.error import HTTPError
 from datetime import datetime, timezone
 from . import profiles
 from .transport import Console, CLI_ERROR, EnableSetupRequired
@@ -108,7 +107,10 @@ def recovery_hint(detail):
     return ''
 
 
-PORT_IN_USE = re.compile(r"bind on address \('([^']*)',\s*(\d+)\).{0,200}?address already in use", re.I | re.S)
+PORT_IN_USE = re.compile(
+    r"bind on address \('([^']*)',\s*(\d+)\).{0,200}?(?:address already in use|\[winerror\s+10048\]|\[errno\s+10048\])",
+    re.I | re.S)
+PORT_RETRY_DELAYS = (1, 2)
 
 
 def diagnose_start_failure(api, node, detail):
@@ -144,9 +146,10 @@ def diagnose_start_failure(api, node, detail):
         diagnosis['hint'] = ('Port {} on compute {} is also assigned to {}. Stop that node or close that project in GNS3, '
                              'then retry. TopoLog does not stop other projects or change console ports.').format(port, compute, names)
     elif lookup == 'complete':
+        backend = 'the GNS3 VM' if compute == 'vm' else 'the GNS3 backend serving that compute'
         diagnosis['hint'] = ('No opened GNS3 project on compute {} reports port {}. A leftover process on that compute '
-                             '(for example an earlier QEMU console) may still hold it. Save other work, restart the GNS3 VM '
-                             'or backend, then retry. Changing the node console port is a project edit left to the user.').format(compute, port)
+                             'may still hold it. Save other work, restart {}, then retry. '
+                             'Changing the node console port is a project edit left to the user.').format(compute, port, backend)
     else:
         diagnosis['hint'] = ('Port {} on compute {} is in use; the owner could not be listed ({}). '
                              'TopoLog did not change ports or stop other work.').format(port, compute, lookup)
@@ -520,6 +523,8 @@ def collect_node(api, node, folder, spec, selected, ready_timeout=120, cancel=No
             text = re.sub(r'<--- More ---> {0,14}', '', text)
             (folder / record['file']).write_text(text, encoding='utf-8')
             record.update(status='collected', text=text, cli_error=bool(CLI_ERROR.search(text)), finished_at=now())
+            from .command_evidence import response_state
+            record['response_state'] = response_state(record)
             return record
         version = '' if node['node_type'] == 'vpcs' else execute('show version')['text']
         if node['node_type'] == 'vpcs':
@@ -580,6 +585,26 @@ def collect_node(api, node, folder, spec, selected, ready_timeout=120, cancel=No
                 # Driver mismatch is recorded as inconclusive, never a pass.
                 continue
             execute(command)
+        # Probe alternatives from actual replies, independent of node names or
+        # hardware models. Keep rejected commands and files as original evidence.
+        from . import command_evidence
+        for first in list(result['commands']):
+            candidates = command_evidence.alternatives(first['command'], os_type)
+            if len(candidates) < 2:
+                continue
+            latest = command_evidence.latest(result['commands'], first['command'], vlan_equivalent=True)
+            if command_evidence.usable(latest):
+                continue
+            if command_evidence.response_state(latest) not in ('unsupported', 'no_output', 'unrecognized_output'):
+                continue
+            for alternative in candidates[1:]:
+                if any(c['command'] == alternative for c in result['commands']):
+                    continue
+                reply = execute(alternative, optional=True)
+                reply['fallback_for'] = first['command']
+                reply['response_state'] = command_evidence.response_state(reply)
+                if command_evidence.usable(reply):
+                    break
         props = node.get('properties', {})
         config_path = None
         if node['node_type'] == 'dynamips' and isinstance(props.get('dynamips_id'), int):
@@ -602,7 +627,10 @@ def collect_node(api, node, folder, spec, selected, ready_timeout=120, cancel=No
                     and not re.search(r'(?i)non-volatile configuration.*not present|startup-config.*not (?:present|found)',content)):
                 (folder/'startup.cfg').write_text(content+'\n',encoding='utf-8')
                 result['startup_configuration']={'status':'collected','file':'startup.cfg','source':'console','collected_at':now()}
-        result['collection'] = 'partial' if any(c.get('cli_error') and not c.get('optional') for c in result['commands']) else 'collected'
+        result['collection'] = 'partial' if any(c.get('cli_error') and not c.get('optional') and not (
+            len(command_evidence.alternatives(c['command'], os_type)) > 1 and
+            command_evidence.usable(command_evidence.latest(result['commands'], c['command'], vlan_equivalent=True)))
+            for c in result['commands']) else 'collected'
     except (InterruptedError, KeyboardInterrupt):
         result.update(collection='cancelled', reason='Collection cancelled by user')
     except Exception as exc:
@@ -837,6 +865,31 @@ class Runner:
             self.pause.wait(self.cancel, where)
         self.check_cancel()
 
+    def _start_node(self, path, record):
+        """Retry an explicit port bind conflict, keeping the original response."""
+        attempts = []
+        for index, delay in enumerate((*PORT_RETRY_DELAYS, None), start=1):
+            self.check_cancel()
+            try:
+                self.api.call(path, 'POST')
+            except (InterruptedError, KeyboardInterrupt):
+                raise
+            except Exception as exc:
+                detail = error_detail(exc)
+                attempts.append({'attempt': index, 'status': 'failed', 'detail': detail})
+                if delay is None or not PORT_IN_USE.search(detail):
+                    if index > 1:
+                        record['startup_attempts'] = attempts
+                    return detail
+                record['startup_attempts'] = attempts
+                self.progress('[{}] 콘솔 포트 충돌로 {}초 뒤 장비 시작을 다시 시도합니다.'.format(record['name'], delay))
+                if self.cancel.wait(delay):
+                    self.check_cancel()
+            else:
+                if attempts:
+                    attempts.append({'attempt': index, 'status': 'started'})
+                return None
+
     def _stable_server(self, checks=3, timeout=90):
         """Wait until the GNS3 server answered `checks` times in a row, one second apart.
 
@@ -871,6 +924,10 @@ class Runner:
         """A load/open request; a dropped connection marks the project so nothing else is sent to it."""
         try:
             return self.api.call(*args)
+        except HTTPError:
+            # A server response (for example a missing helper, HTTP 409) is not
+            # a dropped connection. Preserve the actual response diagnosis.
+            raise
         except OSError:
             # The server went away in the middle of loading. Closing or stopping now would make
             # GNS3 write the half-loaded project back to its file, so the project is left as it is.
@@ -886,8 +943,9 @@ class Runner:
             raise ValueError(DUPLICATE_OPENED.format(path=registered.get('path'), name=registered.get('name')))
         new_id = str(uuid.uuid4())
         self.progress('같은 GNS3 ID의 다른 프로젝트가 있어 임시 사본으로 수집합니다: ' + entry['name'])
-        copied = projectcopy.make(root / entry['file'], projectcopy.work_root(self.output), new_id, entry['folder'])
+        copied = projectcopy.make_on_controller(self.api, root / entry['file'], new_id)
         entry['gns3_copy'] = {'project_id': new_id, 'path': str(copied), 'source_file': str(root / entry['file']),
+                              'storage': 'controller',
                               'reason': 'same_folder' if entry.get('source_project_id') else 'registered_elsewhere',
                               'other': (registered or {}).get('path') if registered else None}
 
@@ -901,18 +959,35 @@ class Runner:
         errors = []
         for entry in copies:
             copy = entry['gns3_copy']
+            if copy.get('removed'):
+                continue
+            copy['removed'] = False
             try:
+                if copy.get('storage') == 'controller':
+                    projectcopy.delete_controller_copy(self.api, copy)
+                    copy['removed'] = True
+                    continue
                 info = self.api.call('/v2/projects/' + copy['project_id'])
                 # Only a project whose files are inside this run's temporary folder is ever deleted.
                 if projectcopy.is_inside(info.get('path', ''), root):
                     self.api.call('/v2/projects/' + copy['project_id'], 'DELETE')
+                    copy['removed'] = True
+                else:
+                    raise ValueError('Temporary project location changed')
+            except HTTPError as exc:
+                if exc.code == 404:
+                    copy['removed'] = True
+                else:
+                    errors.append('{}: GNS3에서 임시 사본 정리 실패({})'.format(entry['name'], type(exc).__name__))
             except Exception as exc:
                 errors.append('{}: GNS3에서 임시 사본 정리 실패({})'.format(entry['name'], type(exc).__name__))
-            copy['removed'] = True
         problem = projectcopy.remove(root)
         if problem:
             errors.append(problem)
-        report['temporary_copies'] = {'projects': len(copies), 'folder': str(root), 'removed': not root.exists(), 'errors': errors}
+        report['temporary_copies'] = {'projects': len(copies), 'folder': str(root),
+                                     'controller_folders': [str(Path(e['gns3_copy']['path']).parent) for e in copies
+                                                            if e['gns3_copy'].get('storage') == 'controller'],
+                                     'removed': not root.exists() and all(e['gns3_copy'].get('removed') for e in copies), 'errors': errors}
 
     def run(self, root):
         runtime.ensure_current()
@@ -1024,18 +1099,18 @@ class Runner:
                         if node.get('status') == 'suspended':
                             record.update(collection='not_run', reason='Suspended node preserved')
                             continue
+                        detail = None
                         try:
                             if node.get('status') != 'started':
                                 # Journal before POST: server may start even if response times out.
                                 started.append(nid)
-                                self.api.call(prefix + '/nodes/' + nid + '/start', 'POST')
-                            record['collection'] = 'pending'
+                                detail = self._start_node(prefix + '/nodes/' + nid + '/start', record)
                         except (InterruptedError, KeyboardInterrupt):
                             record.update(collection='cancelled', reason='Node startup cancelled')
                             raise
-                        except Exception as exc:
+                        if detail is not None:
                             record['collection'] = 'failed'
-                            record['reason'] = 'Node startup failed: ' + error_detail(exc)
+                            record['reason'] = 'Node startup failed: ' + detail
                             self.progress(record['reason'])
                             diagnosis = diagnose_start_failure(self.api, node, record['reason'])
                             if diagnosis:
@@ -1208,7 +1283,20 @@ class Runner:
                             entry['cleanup_errors'].append('Could not stop ' + nid)
                     if opened:
                         try:
-                            self.api.call(prefix + '/close', 'POST')
+                            if entry.get('gns3_copy',{}).get('storage') == 'controller':
+                                # Delete while still open: a closed GNS3 project
+                                # is otherwise loaded again just to delete it.
+                                from . import projectcopy
+                                projectcopy.delete_controller_copy(self.api, entry['gns3_copy'])
+                                entry['gns3_copy']['removed'] = True
+                            else:
+                                self.api.call(prefix + '/close', 'POST')
+                        except HTTPError as exc:
+                            # A rejected load may never register a project.
+                            # Keep its original error, without inventing a
+                            # second cleanup failure for an absent resource.
+                            if exc.code != 404 or entry['nodes'] or entry.get('status') != 'error':
+                                entry['cleanup_errors'].append('Could not close project')
                         except Exception:
                             entry['cleanup_errors'].append('Could not close project')
                     if entry['cleanup_errors']:
@@ -1333,7 +1421,7 @@ def write_collection_record(output, report):
                 lines.append('  - 수집 내용: ' + check.get('command', '설정 정리'))
                 if check.get('criterion'):
                     from .reporting import expectation
-                    lines.append('    설정·확인 내용: ' + expectation(check['criterion']))
+                    lines.append('    설정·확인 내용: ' + expectation(check['criterion'], check.get('command')))
                 if 'observed' in check:
                     from .reporting import ping_observation
                     lines.append('    관측값: ' + (ping_observation(check) if isinstance(check['observed'],dict) and 'success_percent' in check['observed'] else json.dumps(check['observed'], ensure_ascii=False)))

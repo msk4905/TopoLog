@@ -84,6 +84,20 @@ def _session(api, entry, folder, node, commands, factory, progress, cancel, enab
     platform = node.get('platform')
     console = None
     terminal = {}
+    completed_commands = 0
+    current = None
+
+    def evidence(command, status, started, **details):
+        name = '{:02d}.txt'.format(len(node['commands']) + 1)
+        item = {'command': command, 'file': name, 'status': status,
+                'started_at': started, 'finished_at': now(), 'phase': 'final_routing',
+                'optional': True, **details}
+        if attempt > 1:
+            item.update(attempt=attempt, sample_reason=reason)
+        artifact = details['text'] if status == 'collected' else '{}: {}\n'.format(status, details['reason'])
+        (folder / node_dir(node) / name).write_text(artifact, encoding='utf-8')
+        node['commands'].append(item)
+
     try:
         fresh = api.call('/v2/projects/' + api_id(entry) + '/nodes/' + node['node_id'])
         host = fresh.get('console_host')
@@ -104,17 +118,21 @@ def _session(api, entry, folder, node, commands, factory, progress, cancel, enab
         for command in commands:
             if cancel and cancel.is_set():
                 raise InterruptedError('Final routing observation cancelled')
-            started = now()
+            current = now()
             text = console.command(command)
             text = re.sub(r'<--- More ---> {0,14}', '', text)
-            name = '{:02d}.txt'.format(len(node['commands']) + 1)
-            (folder / node_dir(node) / name).write_text(text, encoding='utf-8')
-            item = {'command': command, 'file': name, 'text': text, 'status': 'collected',
-                    'started_at': started, 'finished_at': now(), 'phase': 'final_routing',
-                    'optional': True, 'cli_error': bool(CLI_ERROR.search(text))}
-            if attempt > 1:
-                item.update(attempt=attempt, sample_reason=reason)
-            node['commands'].append(item)
+            evidence(command, 'collected', current, text=text, cli_error=bool(CLI_ERROR.search(text)))
+            current = None
+            completed_commands += 1
+    except (Exception, KeyboardInterrupt) as exc:
+        detail = '{}: {}'.format(type(exc).__name__, exc)
+        for index, command in enumerate(commands[completed_commands:]):
+            if index == 0 and current is not None:
+                status = 'cancelled' if isinstance(exc, (InterruptedError, KeyboardInterrupt)) else 'failed'
+                evidence(command, status, current, reason=detail)
+            else:
+                evidence(command, 'not_run', None, reason='Final observation interrupted before command: ' + detail)
+        raise
     finally:
         if console:
             previous_cancel = getattr(console, 'cancel', None)
@@ -217,7 +235,6 @@ def refresh(api, entry, folder, factory, progress, cancel, enable, password, pro
                 sample['status'] = 'cancelled'
                 raise
             except Exception as exc:
-                # A failed re-sample keeps the earlier final sample as the latest evidence.
                 sample.update(status='failed', reason=type(exc).__name__ + ': ' + str(exc))
             finally:
                 sample['finished_at'] = now()

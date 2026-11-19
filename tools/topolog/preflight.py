@@ -204,7 +204,10 @@ def _prepare(api_factory, launch, progress, cancel, gui_timeout, vm_timeout, nee
     record['controller'] = 'ready'
     enabled, connected = vm_status(api)
     record['gns3_vm'] = {'enabled': enabled, 'connected': connected}
-    if enabled and not connected:
+    if not needs_vm:
+        if not connected:
+            progress('Preflight: 선택한 프로젝트는 GNS3 VM 장비가 없어 VM 연결을 기다리지 않고 계속 진행합니다.')
+    elif enabled and not connected:
         # Short on purpose: a VM that GNS3 did not start is restarted by the user.
         if vm_timeout is None:
             vm_timeout = 90 if record['launched'] else 60
@@ -216,9 +219,7 @@ def _prepare(api_factory, launch, progress, cancel, gui_timeout, vm_timeout, nee
             record['gns3_vm']['last_error'] = error
             message = ('GNS3 VM이 자동으로 켜지지 않았습니다' + (' (GNS3 기록: ' + error + ')' if error else '') +
                        '. VMware에서 GNS3 VM을 켠 뒤 다시 실행하세요.')
-            if needs_vm:
-                raise ValueError(message)
-            progress('Preflight: ' + message + ' 이번 프로젝트는 VM 장비가 없어 계속 진행합니다.')
+            raise ValueError(message)
     minimize_started(record, vmware_before, gns3_before)
     if record['launched']:
         # The fresh GUI shows its startup "Project" chooser; the screenshot step

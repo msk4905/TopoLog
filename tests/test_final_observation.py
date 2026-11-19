@@ -109,7 +109,7 @@ class FinalObservationTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2)
         self.assertEqual(r1['final_routing']['status'], 'completed')  # first final sample kept
 
-    def test_failed_recheck_keeps_previous_final_sample(self):
+    def test_failed_recheck_preserves_previous_sample_without_using_it_as_latest(self):
         r1 = node('r1', [('show ip interface brief', BRIEF_DOWN)])
         calls = {'n': 0}
         base = factory({'show ip interface brief': [BRIEF_DOWN]})
@@ -126,6 +126,35 @@ class FinalObservationTests(unittest.TestCase):
         self.assertEqual(r1['final_routing']['rechecks'][0]['status'], 'failed')
         self.assertEqual(r1['final_routing']['status'], 'recheck_failed')
         self.assertEqual(r1['collection'], 'partial')
+        self.assertEqual([item['status'] for item in r1['commands']], ['collected', 'collected', 'not_run'])
+        self.assertEqual(r1['commands'][1]['text'], BRIEF_DOWN)
+        rule = {'kind': 'interface_up', 'command': 'show ip interface brief', 'interface': 'Serial1/1'}
+        check = verify.evaluate(rule, r1['commands'])
+        self.assertEqual((check['status'], check['evidence']), ('inconclusive', '03.txt'))
+
+    def test_final_command_timeout_keeps_attempt_and_later_commands_not_run(self):
+        r1 = node('r1', [('show ip route', 'C 10.0.0.0/8 is directly connected, Loopback0'),
+                         ('show ip ospf neighbor', '2.2.2.2 1 FULL/DR')])
+        base = factory({})
+        def flaky(*args, **kwargs):
+            console = base()
+            real_command = console.command
+            def send(command):
+                if command == 'show ip route':
+                    raise TimeoutError('command timed out')
+                return real_command(command)
+            console.command = send
+            return console
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            (folder / 'r1').mkdir()
+            final_routes.refresh(API(), {'project_id': 'p', 'nodes': [r1]}, folder, flaky,
+                                 lambda _: None, None, True, None, None, [])
+            self.assertIn('TimeoutError', (folder / 'r1' / '03.txt').read_text(encoding='utf-8'))
+            self.assertTrue((folder / 'r1' / '04.txt').read_text(encoding='utf-8').startswith('not_run:'))
+        self.assertEqual([item['status'] for item in r1['commands'][-2:]], ['failed', 'not_run'])
+        rule = {'kind': 'route_covered', 'command': 'show ip route', 'address': '10.0.0.5'}
+        self.assertEqual(verify.evaluate(rule, r1['commands'])['status'], 'inconclusive')
 
     def test_final_sessions_run_two_at_a_time(self):
         active = {'now': 0, 'peak': 0}

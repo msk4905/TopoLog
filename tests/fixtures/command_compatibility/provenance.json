@@ -1,0 +1,43 @@
+{
+  "source": "TopoLog_test\\export\\TopoLog_수집결과_2026-11-14_15-09-24\\수집_기록\\summary.json",
+  "source_sha256": "a645363e035cf393cbb4b3c4f648b76676d08649de5de0981098fb2c6d7b82d5",
+  "fixtures": [
+    {
+      "file": "vlan_ambiguous_real.txt",
+      "kind": "saved_real_output",
+      "project": "20260902-1",
+      "node": "ESW2",
+      "command": "show vlan brief",
+      "sha256": "4f012b224975c0910efeface016d3cfc017292d593ce46649df2e97de1b56bcc",
+      "original_command_file": "05.txt"
+    },
+    {
+      "file": "acl_interface_real.txt",
+      "kind": "saved_real_output",
+      "project": "20260929-1",
+      "node": "R2",
+      "command": "show ip interface",
+      "sha256": "82d524405a4e93d0303780b4933c9d26bea2032832ed9fd97afb353a818ecf50",
+      "original_command_file": "09.txt"
+    },
+    {
+      "file": "stp_real.txt",
+      "kind": "saved_real_output",
+      "project": "20260903-2",
+      "node": "ESW5",
+      "command": "show spanning-tree",
+      "sha256": "d530429cf506e2420ebc777942bbba2104f44d78ed7850ec94e59568d27242f0",
+      "original_command_file": "06.txt"
+    }
+  ],
+  "synthetic": "VLAN table and mock console replies in test_command_compatibility.py are synthetic, not new device observations.",
+  "live_fixture": {
+    "file": "vlan_switch_live.txt",
+    "kind": "actual_GNS3_console_output",
+    "project": "20260902-1",
+    "node": "ESW2",
+    "command": "show vlan-switch brief",
+    "sha256": "554b319fc2123f438e5cbea516d64e7c2d0c4721005707f52abf7b7762009c38",
+    "source": "work/restore-20261119/live-resumed/focus/result/수집_기록/20260902-1/ESW2/09.txt"
+  }
+}

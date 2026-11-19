@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from topolog import preflight, settings, progress
@@ -73,6 +73,30 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(record['gns3_vm']['connected'])
         self.assertIn('계속 진행', messages[-1])
 
+    def test_local_projects_never_wait_for_enabled_disconnected_vm(self):
+        api = API(vm_enabled=True, vm_connected=False)
+        messages = []
+        with patch('topolog.preflight._wait', side_effect=lambda condition, *args, **kwargs: condition()) as wait:
+            record = preflight.prepare(lambda: api, True, progress=messages.append,
+                                       is_running=lambda: True, needs_vm=False, vm_timeout=90)
+        self.assertEqual(wait.call_count, 1)  # controller readiness only
+        self.assertEqual(sum(p == '/v2/computes' for p, _ in api.calls), 1)
+        self.assertEqual(record['controller'], 'ready')
+        self.assertFalse(record['gns3_vm']['connected'])
+        self.assertTrue(any('VM 연결을 기다리지 않고' in message for message in messages))
+        self.assertFalse(any('VMware에서' in message for message in messages))
+
+    def test_local_projects_continue_when_vm_api_is_unavailable(self):
+        class LocalOnly(API):
+            def call(self, path, method='GET', body=None):
+                if path in ('/v2/gns3vm', '/v2/computes'):
+                    raise OSError('VM service unavailable')
+                return super().call(path, method, body)
+        with patch('topolog.preflight._wait', side_effect=lambda condition, *args, **kwargs: condition()) as wait:
+            record = preflight.prepare(lambda: LocalOnly(), True, is_running=lambda: True, needs_vm=False)
+        self.assertEqual(wait.call_count, 1)
+        self.assertEqual(record['controller'], 'ready')
+
     def test_default_vm_wait_is_short(self):
         import inspect
         self.assertIn("90 if record['launched'] else 60", inspect.getsource(preflight._prepare))
@@ -85,6 +109,10 @@ class PreflightTests(unittest.TestCase):
             self.assertFalse(preflight.projects_need_vm(root, [{'file': 'a.gns3', 'status': 'pending'}]))
             self.assertTrue(preflight.projects_need_vm(root, [{'file': 'a.gns3'}, {'file': 'b.gns3'}]))
             self.assertFalse(preflight.projects_need_vm(root, [{'file': 'b.gns3', 'status': 'excluded'}]))
+            (root / 'c.gns3').write_text(json.dumps({'topology': {'nodes': [
+                {'node_type': 'qemu', 'compute_id': 'remote-lab'},
+                {'node_type': 'ethernet_switch'}, {'node_type': 'vpcs', 'compute_id': 'local'}]}}), encoding='utf-8')
+            self.assertFalse(preflight.projects_need_vm(root, [{'file': 'c.gns3', 'status': 'pending'}]))
 
     def test_missing_executable_is_a_clear_error(self):
         with self.assertRaises(ValueError):
